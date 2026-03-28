@@ -1,8 +1,12 @@
 import numpy as np
+import torch
+import torch.nn as nn
+from torch.cuda.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
+from tqdm import tqdm
 import argparse
-import time 
+import time
 
 import sys
 sys.path.append('./utils')
@@ -90,7 +94,8 @@ def parse_args():
     parser.add_argument('--learnable_temp', type=float, default=0.02, help='Learnable parameter temperature for InfoNCE')
     parser.add_argument('--accumulation_steps', type=int, default=4, help='Gradient accumulation steps')
     parser.add_argument('--patience', type=int, default=10, help='Early Stopping patience')
-    
+    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+
     return parser.parse_args()
 
 def main():
@@ -122,11 +127,11 @@ def main():
 
         # Training
         train_loss = train_one_epoch(model, train_loader, optimizer, scaler, \
-                                     device, criterion, args.accumulation_steps, epochs, epoch)
+                                     device, criterion, args.accumulation_steps, args.epochs, epoch)
 
 
         # Validation
-        val_loss = validate(model, val_loader, device, criterion, epochs, epoch)
+        val_loss = validate(model, val_loader, device, criterion, args.epochs, epoch)
 
         # Learning rate scheduler step
         lr_scheduler.step()
@@ -146,16 +151,17 @@ def main():
             torch.save(model.state_dict(), f"multimodel_epoch_{epoch}_batch{args.batch_size}.pth")
         
         lr = optimizer.param_groups[0]['lr']
-        temp = criterion_simclr.temperature.item()
-        
+        temp = criterion.temperature.item()
+
         print("\n" + "=" * 40)
-        print(f"Epoch {epoch + 1}/{epochs} - Training Summary")
+        print(f"Epoch {epoch + 1}/{args.epochs} - Training Summary")
         print("-" * 40)
         print(f"Train Loss: {train_loss:.4f}")
-        print(f"Validation Loss: {val_loss:.4f}")
-        print(f"Learning Rate: {lr:.7f}")
-        print(f"Temperature: {temp:.4f}")
-        print(f"Time taken: {(time.time() - start) / 60}")
+        print(f"Train Loss:       {train_loss:.4f}")
+        print(f"Validation Loss:  {val_loss:.4f}")
+        print(f"Learning Rate:    {lr:.7f}")
+        print(f"Temperature:      {temp:.4f}")
+        print(f"Time taken (min): {(time.time() - start) / 60:.2f}")
         print("=" * 40 + "\n")
 
 if __name__ == '__main__':

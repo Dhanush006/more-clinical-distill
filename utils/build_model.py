@@ -1,9 +1,15 @@
-import torch 
+import os
+import torch
 import torch.nn as nn
-import timm 
+import timm
 from collections import OrderedDict
 from transformers import AutoModel, AutoConfig, RobertaTokenizerFast
 from peft import LoraConfig, get_peft_model
+
+# Configurable via env var MORE_ROBERTA_PATH or configs/paths.yaml.
+# Default keeps original relative path for backwards compatibility.
+_DEFAULT_ROBERTA_PATH = "./data/RoBERTa-base-PM-M3/RoBERTa-base-PM-M3-hf"
+ROBERTA_MODEL_PATH = os.environ.get("MORE_ROBERTA_PATH", _DEFAULT_ROBERTA_PATH)
 
 class Attention(timm.models.vision_transformer.Attention):
     fused_attn: False
@@ -207,10 +213,8 @@ class MultiModalHead(nn.Module):
 class MultiModal(nn.Module):
     def __init__(self):
         super(MultiModal, self).__init__()
-        config = AutoConfig.from_pretrained(
-                "./data/RoBERTa-base-PM-M3/RoBERTa-base-PM-M3-hf",
-            )
-        self.text_model = AutoModel.from_pretrained("./data/RoBERTa-base-PM-M3/RoBERTa-base-PM-M3-hf", config=config)
+        config = AutoConfig.from_pretrained(ROBERTA_MODEL_PATH)
+        self.text_model = AutoModel.from_pretrained(ROBERTA_MODEL_PATH, config=config)
         # self.llm_model = AutoModel.from_pretrained("epfl-llm/meditron-7b")
         # for param in self.text_model.parameters():
         #     param.requires_grad = False

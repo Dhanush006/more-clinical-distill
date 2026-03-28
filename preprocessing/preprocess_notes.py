@@ -45,8 +45,8 @@ def get_clinical_xray(base_path):
         else:
             # If neither section is found, store the entire content
             clinical_xray[key] = content
-            
-        return clinical_xray
+
+    return clinical_xray
         
 # Function to remove '\n' and '_' from a string
 def clean_text(text):
@@ -72,15 +72,17 @@ def remove_sentences_with_time(text):
     return cleaned_text
 
 
-cleaned_texts = {doc_id: clean_text(text) for doc_id, text in clinical_xray.items()}
-cleaned_texts = {doc_id: remove_sentences_with_time(text) for doc_id, text in cleaned_texts.items()}
+if __name__ == "__main__":
+    import sys, json
 
-with open('./data/notes_xray.json', 'w') as json_file:
-    json.dump(cleaned_texts, json_file, indent=4)
+    xray_base_path = sys.argv[1] if len(sys.argv) > 1 else "./mimic-cxr-jpg-2.0.0.physionet.org/files"
+    clinical_xray = get_clinical_xray(xray_base_path)
 
-df = pd.read_csv('./data/cxr_ecg_merged_labels_60days.csv')
-data = df.values
-data = [[item[8], item[9], item[38], item[39], item[14:22], item[24:37], item[7]] for item in data]
+    cleaned_texts = {doc_id: clean_text(text) for doc_id, text in clinical_xray.items()}
+    cleaned_texts = {doc_id: remove_sentences_with_time(text) for doc_id, text in cleaned_texts.items()}
+
+    with open('./data/notes_xray.json', 'w') as json_file:
+        json.dump(cleaned_texts, json_file, indent=4)
 
 labels = ['Atelectasis', 'Cardiomegaly', 'Consolidation',
        'Edema', 'Enlarged Cardiomediastinum', 'Fracture', 'Lung Lesion',
@@ -93,37 +95,48 @@ substrings_to_remove = ["FINDING:", "IMPRESSION:"]
 def generate_xray_note(labels_array, labels):
     present_labels = [labels[i] for i, label_present in enumerate(labels_array) if label_present == 1.0]
     uncertain_labels = [labels[i] for i, label_present in enumerate(labels_array) if label_present == -1.0]
-    
+
     parts = []
-    
+
     if present_labels:
         parts.append(", ".join(present_labels) + " is present")
-    
+
     # If there are uncertain labels, add them to the parts list
     if uncertain_labels:
         parts.append("uncertain finding of " + ", ".join(uncertain_labels))
-        
+
     return ". ".join(parts)
-    
+
 def process_item(item, include_special_tokens=False):
     # Extract or generate the X-ray note
     xray_note = item[2] if item[2].strip() else generate_xray_note(item[4], labels)
     xray_note = xray_note.replace("FINDINGS:", "").replace("IMPRESSION:", "")
     # Use the ECG note or a placeholder if not available
     ecg_note = item[3] if item[3].strip() else "ECG note not available."
-    # Combine the notes with modality indicators
-    # if include_special_tokens:
-    #     combined_notes = f"<CLS> <XRAY> {xray_note} <SEP> <ECG> {ecg_note}"
-    # else:
-    #     combined_notes = f"The report from Xray is: {xray_note.strip()} <SEP> The report from ECG is:{ecg_note.strip()}"
     xray_note = 'The report from Xray is: '+xray_note
     ecg_note = 'The report from ECG is: '+ecg_note
     modified_item = list(item)  # Ensure we have a mutable version of the item
     modified_item[2] = xray_note  # Place combined notes in the X-ray note position
     modified_item[3] = ecg_note
-    
+
     return modified_item
 
-combined_notes_list = [process_item(item) for item in data]
+if __name__ == "__main__":
+    import sys, json
 
-np.save('./data/xray_ecg_notes_labels_combined_60days.npy', combined_notes_list)
+    xray_base_path = sys.argv[1] if len(sys.argv) > 1 else "./mimic-cxr-jpg-2.0.0.physionet.org/files"
+    clinical_xray = get_clinical_xray(xray_base_path)
+
+    cleaned_texts = {doc_id: clean_text(text) for doc_id, text in clinical_xray.items()}
+    cleaned_texts = {doc_id: remove_sentences_with_time(text) for doc_id, text in cleaned_texts.items()}
+
+    with open('./data/notes_xray.json', 'w') as json_file:
+        json.dump(cleaned_texts, json_file, indent=4)
+
+    df = pd.read_csv('./data/cxr_ecg_merged_labels_60days.csv')
+    data = df.values
+    data = [[item[8], item[9], item[38], item[39], item[14:22], item[24:37], item[7]] for item in data]
+
+    combined_notes_list = [process_item(item) for item in data]
+
+    np.save('./data/xray_ecg_notes_labels_combined_60days.npy', combined_notes_list)
