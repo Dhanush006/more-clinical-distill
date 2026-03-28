@@ -1,0 +1,53 @@
+# ============================================================
+# configs/distill_config.yaml
+#
+# Configuration for distillation training.
+# Teacher: MoRE MultiModal (frozen)
+# Student: MobileNetV3-Small (single-lead ECG)
+# ============================================================
+
+# ── Teacher ──────────────────────────────────────────────────
+teacher:
+  checkpoint:       outputs/teacher/best_multimodel.pth
+  # Pre-computed ECG embeddings (shape: N×128, aligned with train .npy)
+  # Generate with:  python distill/cache_teacher_embeddings.py
+  embedding_cache:  outputs/teacher/ecg_embeddings_train.npy
+
+# ── Student ───────────────────────────────────────────────────
+student:
+  architecture:        mobilenetv3_small_100
+  num_classes:         4          # Atelectasis, Cardiomegaly, Edema, Pleural Effusion
+  embedding_dim:       128        # must match teacher ECG projector output dim
+  signal_length:       1000       # samples at 100 Hz (after 500→100 Hz downsample)
+  input_lead:          0          # 0=Lead I, 1=Lead II, 7=V2 (0-indexed)
+  pretrained_backbone: false      # set true to use ImageNet-pretrained MobileNetV3
+
+# ── Data ─────────────────────────────────────────────────────
+data:
+  train_npy: data/processed/more_train.npy
+  val_npy:   data/processed/more_val.npy
+  test_npy:  data/processed/more_test.npy
+
+# ── Loss weights ─────────────────────────────────────────────
+# L = alpha*L_task + beta*L_kl + gamma*L_align + delta*L_xmodal
+loss_weights:
+  alpha: 1.0     # task loss (BCE on CVD labels)
+  beta:  0.5     # soft logits KL divergence (teacher → student)
+  gamma: 0.5     # embedding alignment (cosine similarity)
+  delta: 0.3     # cross-modal similarity matching (ECG-CXR teacher sim)
+
+# ── Training ─────────────────────────────────────────────────
+training:
+  epochs:        100
+  batch_size:    64
+  num_workers:   4
+  learning_rate: 1.0e-4
+  weight_decay:  0.01
+  t_0:           10
+  eta_min:       1.0e-6
+  kl_temperature: 4.0    # temperature for soft label KL loss
+
+# ── Outputs ──────────────────────────────────────────────────
+outputs:
+  checkpoint_dir: outputs/distill
+  log_dir:        logs/distill
