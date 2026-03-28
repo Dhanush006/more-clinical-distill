@@ -1,0 +1,47 @@
+# Data directories (never commit raw or processed data)
+data/
+outputs/
+logs/
+
+# Secrets and credentials
+.env
+*.env
+secrets/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+.eggs/
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Large model/array files
+*.npy
+*.npz
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.hdf5
+*.lmdb/
+*.mdb
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Slurm output (per-run logs, not scripts)
+slurm-*.out
+slurm-*.err

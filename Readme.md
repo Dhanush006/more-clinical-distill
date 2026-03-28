@@ -1,4 +1,101 @@
-## Please Cite this work as:
+# more-clinical-distill
+
+**Branch:** `more-KD`
+**Goal:** Multimodal clinical pipeline for heart disease classification via knowledge distillation — multimodal MoRE teacher (ECG + CXR + Text) → lightweight single-lead ECG student (MobileNetV3-Small).
+**Data:** MIMIC-IV-ECG + MIMIC-CXR-JPG, 49,076 matched patient records.
+**HPC:** Texas A&M Grace cluster (A100 40GB), SLURM job scheduler.
+
+---
+
+## HPC Setup Flow
+
+### 1. Clone and checkout branch
+```bash
+cd /scratch/user/dshekar
+git clone <repo_url> more-clinical-distill
+cd more-clinical-distill
+git checkout more-KD
+```
+
+### 2. Set up credentials (never committed)
+```bash
+cp .env.example .env
+# Edit .env and fill in PHYSIONET_USER and PHYSIONET_PASS
+```
+
+### 3. Conda environment
+Use existing env `deepship_xares2`, or create a fresh one if dependency conflicts arise:
+```bash
+# Check compatibility first:
+conda run -n deepship_xares2 python -c "import torch, timm, wfdb, peft, transformers"
+
+# If needed, create a new env:
+conda create -n more_kd python=3.10
+conda activate more_kd
+pip install -r requirements.txt
+```
+
+### 4. Review and edit configs/paths.yaml
+All data paths are defined in `configs/paths.yaml`. Edit to match your local layout before running any scripts.
+
+### 5. Data download (Phase 2)
+```bash
+# Build download lists from manifest
+python scripts/build_download_lists.py
+
+# Submit SLURM download job (reads .env for credentials)
+sbatch slurm/download_subset.slurm
+```
+
+### 6. Preprocess to MoRE format (Phase 3)
+```bash
+# Verify downloaded layout
+python scripts/verify_local_dataset_layout.py
+
+# Convert manifest + metadata to MoRE .npy format
+python scripts/convert_manifest_to_more_format.py
+```
+
+### 7. Smoke test pretraining (Phase 4)
+```bash
+sbatch slurm/smoke_test.slurm
+```
+
+### 8. Distillation (Phase 5)
+```bash
+sbatch slurm/distill_train.slurm
+```
+
+---
+
+## Folder Structure
+
+```
+more-clinical-distill/
+├── configs/              # paths.yaml, smoke_test.yaml, distill_config.yaml
+├── data/                 # gitignored — raw downloads and processed arrays
+│   ├── mimic-iv-ecg/
+│   ├── mimic-cxr-jpg/
+│   └── processed/        # MoRE-format .npy files
+├── distill/              # Student model scaffold (Phase 5)
+├── docs/                 # Audit docs and implementation plans
+├── logs/                 # Slurm logs (gitignored)
+├── manifests/            # Download lists (gitignored)
+├── outputs/              # Model checkpoints (gitignored)
+├── preprocessing/        # Original MoRE preprocessing scripts
+├── scripts/              # Project-specific helper scripts
+├── slurm/                # SLURM job scripts
+├── utils/                # Original MoRE utilities
+├── .env.example          # Credential template (copy to .env, never commit)
+├── pretrain_multimodel.py
+└── requirements.txt
+```
+
+---
+
+## Original MoRE README
+
+### Please Cite this work as:
 @article{thapa2024more,
   title={MoRE: Multi-Modal Contrastive Pre-training with Transformers on X-Rays, ECGs, and Diagnostic Report},
   author={Thapa, Samrajya and Howlader, Koushik and Bhattacharjee, Subhankar and others},

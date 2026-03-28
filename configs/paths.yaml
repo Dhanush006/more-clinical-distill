@@ -1,0 +1,54 @@
+# ============================================================
+# more-clinical-distill  —  path configuration
+# All paths are absolute. Override per-machine by copying this
+# file and pointing MORE_PATHS_CONFIG env var at the copy.
+# ============================================================
+
+repo_root: /scratch/user/dshekar/more-clinical-distill
+
+# ── Raw PhysioNet downloads ──────────────────────────────────
+data_root: /scratch/user/dshekar/more-clinical-distill/data
+
+mimic_ecg_root: /scratch/user/dshekar/more-clinical-distill/data/mimic-iv-ecg
+mimic_cxr_root: /scratch/user/dshekar/more-clinical-distill/data/mimic-cxr-jpg
+
+# ── Processed / intermediate outputs ────────────────────────
+processed_root: /scratch/user/dshekar/more-clinical-distill/data/processed
+
+# MoRE-format .npy arrays (one per split)
+more_npy_train: /scratch/user/dshekar/more-clinical-distill/data/processed/more_train.npy
+more_npy_val:   /scratch/user/dshekar/more-clinical-distill/data/processed/more_val.npy
+more_npy_test:  /scratch/user/dshekar/more-clinical-distill/data/processed/more_test.npy
+
+# ── Manifest files ───────────────────────────────────────────
+manifest_v1: /scratch/user/dshekar/matched_patients_v1.csv
+
+# Derived download lists (produced by build_download_lists.py)
+manifests_dir: /scratch/user/dshekar/more-clinical-distill/manifests
+ecg_download_list: /scratch/user/dshekar/more-clinical-distill/manifests/ecg_download_list.txt
+cxr_download_list: /scratch/user/dshekar/more-clinical-distill/manifests/cxr_download_list.txt
+
+# ── Pre-trained model weights ────────────────────────────────
+# MoRE teacher weights (download from Google Drive link in Readme.md)
+more_weights: /scratch/user/dshekar/more-clinical-distill/outputs/more_pretrained.pth
+
+# RoBERTa-base-PM-M3 (HuggingFace or local path)
+roberta_path: /scratch/user/dshekar/more-clinical-distill/data/RoBERTa-base-PM-M3/RoBERTa-base-PM-M3-hf
+
+# ── MIMIC metadata files (needed for labels + notes) ────────
+# From MIMIC-CXR-JPG
+mimic_cxr_split:    /scratch/user/dshekar/more-clinical-distill/data/mimic-cxr-jpg/mimic-cxr-2.0.0-split.csv
+mimic_cxr_chexpert: /scratch/user/dshekar/more-clinical-distill/data/mimic-cxr-jpg/mimic-cxr-2.0.0-chexpert.csv
+mimic_cxr_metadata: /scratch/user/dshekar/more-clinical-distill/data/mimic-cxr-jpg/mimic-cxr-2.0.0-metadata.csv
+mimic_cxr_reports:  /scratch/user/dshekar/more-clinical-distill/data/mimic-cxr-jpg/files  # radiology .txt reports
+
+# From MIMIC-IV-ECG
+mimic_ecg_records:  /scratch/user/dshekar/more-clinical-distill/data/mimic-iv-ecg/record_list.csv
+mimic_ecg_machine_reports: /scratch/user/dshekar/more-clinical-distill/data/mimic-iv-ecg/machine_measurements.csv
+
+# ── Output / logging ─────────────────────────────────────────
+outputs_root: /scratch/user/dshekar/more-clinical-distill/outputs
+logs_root:    /scratch/user/dshekar/more-clinical-distill/logs
+
+# ── Distillation scaffold ────────────────────────────────────
+distill_root: /scratch/user/dshekar/more-clinical-distill/distill
