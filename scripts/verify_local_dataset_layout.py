@@ -54,7 +54,7 @@ def verify(cfg: dict, subset: int | None, report_path: str) -> bool:
             ecg_missing_dat.append(str(dat))
 
         jpg_rel = row["cxr_path"].lstrip("/")
-        jpg = cxr_root / "physionet.org" / "files" / "mimic-cxr-jpg" / "2.0.0" / jpg_rel
+        jpg = cxr_root / "physionet.org" / "files" / "mimic-cxr-jpg" / "2.1.0" / jpg_rel
         if not jpg.exists():
             cxr_missing.append(str(jpg))
 

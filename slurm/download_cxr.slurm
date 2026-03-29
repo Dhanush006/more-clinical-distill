@@ -14,7 +14,7 @@
 #
 # Downloads MIMIC-CXR-JPG files + CXR metadata CSVs.
 # Requires separate DUA approval at:
-#   https://physionet.org/content/mimic-cxr-jpg/2.0.0/
+#   https://physionet.org/content/mimic-cxr-jpg/2.1.0/
 #
 # Usage:
 #   sbatch slurm/download_cxr.slurm

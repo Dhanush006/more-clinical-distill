@@ -22,7 +22,7 @@ import yaml
 
 
 MIMIC_ECG_BASE = "https://physionet.org/files/mimic-iv-ecg/1.0/"
-MIMIC_CXR_BASE = "https://physionet.org/files/mimic-cxr-jpg/2.0.0/"
+MIMIC_CXR_BASE = "https://physionet.org/files/mimic-cxr-jpg/2.1.0/"
 
 
 def load_config(config_path: str) -> dict:
