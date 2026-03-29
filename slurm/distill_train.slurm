@@ -29,7 +29,7 @@
 set -euo pipefail
 
 REPO_DIR="/scratch/user/dshekar/more-clinical-distill"
-PYTHON_BIN="/scratch/user/dshekar/.conda/envs/more_kd/bin/python"
+PYTHON_BIN="/scratch/user/dshekar/.conda/envs/deepship_xares2/bin/python"
 DISTILL_CFG="${REPO_DIR}/configs/distill_config.yaml"
 
 echo "================================================================"

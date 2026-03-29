@@ -110,15 +110,27 @@ def train_one_epoch(
 
 def validate(student, loader, device):
     student.eval()
-    total_loss = 0.0
+    all_logits, all_labels = [], []
     with torch.no_grad():
         for ecg, teacher_emb, labels in loader:
             ecg    = ecg.to(device)
             labels = labels.to(device)
             logits, _ = student(ecg)
-            loss = task_loss(logits, labels)
-            total_loss += loss.item()
-    return total_loss / len(loader)
+            all_logits.append(logits.cpu())
+            all_labels.append(labels.cpu())
+    all_logits = torch.cat(all_logits)
+    all_labels = torch.cat(all_labels).clamp(min=0.0)
+    val_loss = F.binary_cross_entropy_with_logits(all_logits, all_labels).item()
+
+    # AUC-ROC per class (more informative than BCE given class imbalance)
+    probs = torch.sigmoid(all_logits).numpy()
+    labs  = all_labels.numpy()
+    try:
+        from sklearn.metrics import roc_auc_score
+        auc = roc_auc_score(labs, probs, average="macro")
+    except Exception:
+        auc = float("nan")
+    return val_loss, auc
 
 
 # ── Main ──────────────────────────────────────────────────────────────
@@ -139,16 +151,17 @@ def main():
 
     # ── Datasets ──────────────────────────────────────────────────────
     train_ds = DistillDataset(
-        data_path    = cfg["data"]["train_npy"],
-        embed_cache  = cfg["teacher"].get("embedding_cache"),
-        lead_idx     = cfg["student"].get("input_lead", 0),
-        signal_length= cfg["student"].get("signal_length", 1000),
+        data_path      = cfg["data"]["train_npy"],
+        embed_cache    = cfg["teacher"].get("embedding_cache"),
+        study_id_cache = cfg["teacher"].get("study_id_cache"),
+        lead_idx       = cfg["student"].get("input_lead", 0),
+        signal_length  = cfg["student"].get("signal_length", 1000),
     )
     val_ds = DistillDataset(
-        data_path    = cfg["data"]["val_npy"],
-        embed_cache  = None,
-        lead_idx     = cfg["student"].get("input_lead", 0),
-        signal_length= cfg["student"].get("signal_length", 1000),
+        data_path      = cfg["data"]["val_npy"],
+        embed_cache    = None,
+        lead_idx       = cfg["student"].get("input_lead", 0),
+        signal_length  = cfg["student"].get("signal_length", 1000),
     )
 
     train_loader = DataLoader(
@@ -187,28 +200,38 @@ def main():
     out_dir = Path(cfg["outputs"]["checkpoint_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    best_val_loss = float("inf")
-    epochs = cfg["training"]["epochs"]
+    best_val_auc   = 0.0
+    patience       = cfg["training"].get("early_stopping_patience", 15)
+    no_improve     = 0
+    epochs         = cfg["training"]["epochs"]
 
     for epoch in range(epochs):
         t0 = time.time()
         train_loss = train_one_epoch(
             student, train_loader, optimizer, scaler, device, cfg, epoch, epochs
         )
-        val_loss = validate(student, val_loader, device)
+        val_loss, val_auc = validate(student, val_loader, device)
         scheduler.step()
 
         elapsed = (time.time() - t0) / 60
         print(f"\nEpoch {epoch+1}/{epochs} | "
-              f"train={train_loss:.4f}  val={val_loss:.4f}  "
+              f"train={train_loss:.4f}  val_bce={val_loss:.4f}  "
+              f"val_auc={val_auc:.4f}  "
               f"lr={optimizer.param_groups[0]['lr']:.2e}  "
               f"time={elapsed:.1f}min")
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            ckpt = out_dir / f"student_best_ep{epoch+1}_val{val_loss:.4f}.pth"
+        if val_auc > best_val_auc:
+            best_val_auc = val_auc
+            no_improve   = 0
+            ckpt = out_dir / f"student_best_ep{epoch+1}_auc{val_auc:.4f}.pth"
             torch.save(student.state_dict(), ckpt)
             print(f"  Saved best checkpoint: {ckpt}")
+        else:
+            no_improve += 1
+            if no_improve >= patience:
+                print(f"  Early stopping at epoch {epoch+1} "
+                      f"(no AUC improvement for {patience} epochs)")
+                break
 
         if epoch % 10 == 0:
             ckpt = out_dir / f"student_ep{epoch}.pth"

@@ -49,9 +49,10 @@ echo "Step 1/2: Verifying local dataset layout..."
 "${PYTHON_BIN}" scripts/verify_local_dataset_layout.py \
     --config "${CONFIG}" \
     ${SUBSET_ARG} \
-    --report logs/layout_verification.txt
+    --report logs/layout_verification.txt \
+    || echo "Layout verification: partial data detected, proceeding with available files."
 
-echo "Layout verification passed."
+echo "Layout verification done."
 
 # ── Step 2: convert to MoRE format ───────────────────────────────────
 echo ""

@@ -61,7 +61,11 @@ class SingleLeadECGStudent(nn.Module):
             num_classes=0,          # remove classifier head
             global_pool="avg",
         )
-        backbone_dim = self.backbone.num_features  # 576 for small_100
+        # Detect actual output dim via a dummy forward (timm reports 576 via
+        # num_features but the conv_head brings it to 1024 before global pool)
+        with torch.no_grad():
+            _dummy = torch.zeros(1, 3, 25, 40)
+            backbone_dim = self.backbone(_dummy).shape[1]
 
         # ── Projection head (matches teacher ECG projector dim=128) ───
         self.projector = nn.Sequential(
@@ -85,8 +89,10 @@ class SingleLeadECGStudent(nn.Module):
         # (B, 1, T) → (B, 3, T)
         x = self.channel_adapter(x)
 
-        # (B, 3, T) → (B, 3, 1, T) for 2-D backbone
-        x = x.unsqueeze(2)
+        # (B, 3, T) → (B, 3, 25, 40) — reshape to near-square 2-D for better
+        # spatial coverage in MobileNetV3-Small depthwise-separable convs
+        B = x.shape[0]
+        x = x.reshape(B, 3, 25, 40)
 
         # (B, 3, 1, T) → (B, backbone_dim) via MobileNetV3-Small
         features = self.backbone(x)   # global avg pool built in

@@ -8,26 +8,32 @@ Returns per item:
   teacher_embedding: (128,)   float32  — pre-cached teacher ECG embedding
   labels:            (4,)     float32  — CheXpert subset labels
 
-Teacher embeddings are pre-computed by distill/cache_teacher_embeddings.py
-and stored as a .npy array aligned row-for-row with the .npy data file.
+Teacher embeddings are pre-computed by distill/cache_teacher_embeddings.py.
+Alignment is done via study-ID lookup (not index-to-index), so the .npy
+embedding array and the manifest rows can be in any order.
 
-Alternatively, if no cache is provided, embeddings can be computed on-the-fly
-(slower, requires teacher model loaded in the same process).
+Rows where the ECG .hea file is absent or no matching embedding exists are
+silently dropped at __init__ time, so __len__ reflects the usable subset.
 """
+
+import os
+import sys
+from pathlib import Path
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-import sys
 sys.path.append("./utils")
 
 
 class DistillDataset(Dataset):
     """
     Args:
-        data_path:       path to MoRE-format .npy (train split)
-        embed_cache:     path to teacher_embeddings.npy (shape N×128), or None
+        data_path:       path to MoRE-format .npy (train/val/test split)
+        embed_cache:     path to teacher_ecg_embeddings.npy (N×128), or None
+        study_id_cache:  path to teacher_ecg_study_ids.npy (N,), or None
+                         Required when embed_cache is provided for alignment.
         lead_idx:        which ECG lead to use (0=Lead I, 1=Lead II, 7=V2)
         signal_length:   expected signal length after preprocessing (1000)
     """
@@ -36,6 +42,7 @@ class DistillDataset(Dataset):
         self,
         data_path: str,
         embed_cache: str | None = None,
+        study_id_cache: str | None = None,
         lead_idx: int = 0,
         signal_length: int = 1000,
     ):
@@ -43,48 +50,87 @@ class DistillDataset(Dataset):
         self.lead_idx = lead_idx
         self.signal_length = signal_length
 
-        self.embeddings = None
+        # ── Load embedding cache and build study-ID lookup ────────────
+        self.embeddings: np.ndarray | None = None
+        self.emb_lookup: dict[str, int] = {}
+
         if embed_cache is not None:
             self.embeddings = np.load(embed_cache, allow_pickle=True).astype(np.float32)
-            assert len(self.embeddings) == len(self.data), (
-                f"Embedding cache length {len(self.embeddings)} != "
-                f"data length {len(self.data)}"
-            )
+            # Derive study_id_cache path from embed_cache path if not given
+            if study_id_cache is None:
+                study_id_cache = str(Path(embed_cache).parent / "teacher_ecg_study_ids.npy")
+            if os.path.exists(study_id_cache):
+                study_ids = np.load(study_id_cache, allow_pickle=True)
+                self.emb_lookup = {str(sid): i for i, sid in enumerate(study_ids)}
+            else:
+                # Fallback: index-to-index (only safe if arrays are aligned)
+                print(f"[DistillDataset] WARNING: study_id_cache not found at "
+                      f"{study_id_cache}. Falling back to index alignment.")
+
+        # ── Pre-filter: keep only rows with present ECG and embedding ──
+        valid = []
+        for i, item in enumerate(self.data):
+            ecg_stem = item[1]
+            if not os.path.exists(ecg_stem + ".hea"):
+                continue
+            if self.emb_lookup:
+                study_id = Path(ecg_stem).name
+                if study_id not in self.emb_lookup:
+                    continue
+            valid.append(i)
+        self.valid_indices = valid
+
+        n_total = len(self.data)
+        n_valid = len(self.valid_indices)
+        print(f"[DistillDataset] {data_path}: {n_valid}/{n_total} rows usable "
+              f"({100*n_valid/max(n_total,1):.1f}%)")
 
     def __len__(self):
-        return len(self.data)
+        return len(self.valid_indices)
 
     def __getitem__(self, idx):
-        item = self.data[idx]
+        item     = self.data[self.valid_indices[idx]]
         ecg_stem = item[1]
         labels   = item[4].astype(np.float32)
 
-        # ── Load ECG ──────────────────────────────────────────────────
+        # ── Load ECG via wfdb ─────────────────────────────────────────
         import wfdb
-        from scipy.signal import resample_poly
+        from scipy.signal import resample as scipy_resample
 
-        sig, _ = wfdb.rdsamp(ecg_stem)          # (T, 12)
-        sig = np.nan_to_num(sig, nan=0.0)
-        sig = resample_poly(sig, up=1, down=5)   # (200, 12) if 500→100 Hz
+        sig, fields = wfdb.rdsamp(ecg_stem)          # (T, 12), fields dict
+        sig = np.nan_to_num(sig.astype(np.float32), nan=0.0)
 
-        # Select single lead and truncate/pad to signal_length
-        lead = sig[:, self.lead_idx]             # (T,)
+        # Resample to 100 Hz using scipy.signal.resample (matches teacher cache)
+        orig_fs = fields["fs"]
+        if orig_fs != 100:
+            n_out = int(sig.shape[0] * 100 / orig_fs)
+            sig = scipy_resample(sig, n_out, axis=0)  # (1000, 12)
+
+        # Select single lead
+        lead = sig[:, self.lead_idx]                 # (T,)
+
+        # Trim / pad to signal_length
         if len(lead) >= self.signal_length:
             lead = lead[:self.signal_length]
         else:
             lead = np.pad(lead, (0, self.signal_length - len(lead)))
 
-        # Normalise to [-1, 1]
-        lo, hi = lead.min(), lead.max()
-        if hi - lo > 1e-8:
-            lead = 2.0 * (lead - lo) / (hi - lo) - 1.0
+        # Per-lead abs-max normalisation (matches teacher's cache_teacher_embeddings.py)
+        m = np.max(np.abs(lead))
+        if m > 1e-6:
+            lead = lead / m
 
-        ecg_tensor = torch.FloatTensor(lead).unsqueeze(0)  # (1, 1000)
+        ecg_tensor = torch.FloatTensor(lead).unsqueeze(0)   # (1, 1000)
 
         # ── Teacher embedding ─────────────────────────────────────────
         if self.embeddings is not None:
-            teacher_emb = torch.FloatTensor(self.embeddings[idx])
+            if self.emb_lookup:
+                study_id  = Path(ecg_stem).name
+                emb_idx   = self.emb_lookup[study_id]
+            else:
+                emb_idx   = self.valid_indices[idx]
+            teacher_emb = torch.FloatTensor(self.embeddings[emb_idx])
         else:
-            teacher_emb = torch.zeros(128)   # placeholder when no cache
+            teacher_emb = torch.zeros(128)
 
         return ecg_tensor, teacher_emb, torch.FloatTensor(labels)
