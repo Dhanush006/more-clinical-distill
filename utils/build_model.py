@@ -19,7 +19,7 @@ class Attention(timm.models.vision_transformer.Attention):
         self.use_DropKey = use_DropKey
         self.mask_ratio = mask_ratio
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, attn_mask=None, **kwargs) -> torch.Tensor:
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
