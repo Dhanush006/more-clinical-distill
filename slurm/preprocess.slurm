@@ -2,7 +2,7 @@
 #SBATCH --job-name=more_preprocess
 #SBATCH --output=logs/preprocess_%j.log
 #SBATCH --error=logs/preprocess_%j.err
-#SBATCH --partition=cpu
+#SBATCH --partition=medium
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8

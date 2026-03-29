@@ -2,7 +2,7 @@
 #SBATCH --job-name=more_download
 #SBATCH --output=logs/download_%j.log
 #SBATCH --error=logs/download_%j.err
-#SBATCH --partition=cpu
+#SBATCH --partition=medium
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -78,7 +78,11 @@ mkdir -p "${REPO_DIR}/manifests"
 cd "${REPO_DIR}"
 
 echo ""
-echo "Running download_subset.sh..."
+echo "Step 1/2: Downloading metadata CSVs (chexpert, split, machine_measurements)..."
+REPO_DIR="${REPO_DIR}" bash scripts/download_metadata_csvs.sh
+
+echo ""
+echo "Step 2/2: Downloading ECG + CXR files..."
 bash scripts/download_subset.sh
 
 echo ""
