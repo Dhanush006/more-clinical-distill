@@ -25,7 +25,12 @@
 set -euo pipefail
 
 REPO_DIR="/scratch/user/dshekar/more-clinical-distill"
-PYTHON_BIN="/scratch/user/dshekar/.conda/envs/more_kd/bin/python"
+# Use more_kd if available, else fall back to deepship_xares2 (preprocessing is CSV-only, no wfdb needed)
+if [ -f "/scratch/user/dshekar/.conda/envs/more_kd/bin/python" ]; then
+    PYTHON_BIN="/scratch/user/dshekar/.conda/envs/more_kd/bin/python"
+else
+    PYTHON_BIN="/scratch/user/dshekar/.conda/envs/deepship_xares2/bin/python"
+fi
 SUBSET="${SUBSET:-}"
 
 echo "================================================================"
