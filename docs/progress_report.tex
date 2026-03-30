@@ -1,0 +1,502 @@
+%%
+%% Progress Report — ECEN 766 Spring 2026
+%% Multimodal Distillation Method for Heart Disease Classification
+%%
+\documentclass[sigconf,nonacm]{acmart}
+
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{url}
+
+\settopmatter{printacmref=false}
+\renewcommand\footnotetextcopyrightpermission[1]{}
+\pagestyle{plain}
+
+\title{Multimodal Distillation Method for Heart Disease Classification}
+\subtitle{ECEN 766 Spring 2026 — Final Project Progress Update}
+
+\author{Curtis Choy}
+\affiliation{\institution{Texas A\&M University}}
+\email{cthcurtis@tamu.edu}
+
+\author{Dhanush Shekar}
+\affiliation{\institution{Texas A\&M University}}
+\email{dshekar@tamu.edu}
+
+\author{Alexandra Tabacaru}
+\affiliation{\institution{Texas A\&M University}}
+\email{alex.tabac@tamu.edu}
+
+\begin{document}
+\maketitle
+
+%% ──────────────────────────────────────────────────────────────
+\begin{abstract}
+We aim to make the ECG — a fast, inexpensive first-tier diagnostic signal
+— as informative as a full multimodal assessment combining ECG, chest
+X-ray (CXR), and clinical text. Using knowledge distillation, a pretrained
+multimodal teacher (MoRE~\cite{thapa2024more}) transfers its diagnostic
+knowledge to a lightweight single-lead ECG student (MobileNetV3-Small,
+{\raise.17ex\hbox{$\scriptstyle\sim$}}2.54M parameters). This report
+describes progress through Phase 4: data procurement from PhysioNet,
+manifest construction and partial download under HPRC inode constraints,
+MoRE framework adaptation, ECG rhythm label extraction, and teacher
+embedding caching. The student model architecture has been designed and
+implemented with dual classification heads — a primary ECG rhythm
+classification head (10 classes) and a secondary pulmonary risk indicator
+head (4 CheXpert classes) — and distillation training has been initiated.
+
+\subsection*{Availability}
+Code, preprocessing scripts, SLURM job definitions, and configuration
+files are available on GitHub at
+\url{https://github.com/Dhanush006/more-clinical-distill} (branch:
+\texttt{more-KD}). The processed dataset manifests and embedding caches
+are not redistributable (MIMIC data access requires PhysioNet credentials);
+however, the scripts to reproduce all preprocessing steps from a credentialed
+PhysioNet download are fully documented in the repository \texttt{README}.
+\end{abstract}
+
+%% ──────────────────────────────────────────────────────────────
+\section{Introduction}
+
+Heart disease remains a leading cause of global mortality, accounting for
+roughly 19.8 million deaths annually~\cite{who_cvd}. Missed diagnostic
+opportunities — often attributable to limited specialist access or
+single-modality assessment — contribute to delayed treatment and
+preventable mortality~\cite{kwok2022}. Multimodal AI systems that fuse
+ECG, CXR, and clinical text have demonstrated improved diagnostic
+accuracy~\cite{thapa2024more}, but their computational footprint limits
+deployment in resource-constrained or edge settings.
+
+Knowledge distillation~\cite{hinton2015distilling} offers a path forward:
+a capable multimodal teacher imparts its learned representations to a
+lightweight student that operates on a single modality at inference time.
+Our project applies this paradigm to cardiovascular diagnosis, distilling
+the MoRE multimodal teacher into a MobileNetV3-Small student that uses
+only single-lead ECG input.
+
+\section{Related Work}
+
+\subsection{Unimodal AI for Cardiovascular Diagnosis}
+CNN and transformer-based models have been widely applied to ECG
+arrhythmia and cardiac abnormality detection~\cite{avanzato2020,noor2025}.
+These approaches benefit from simplicity but cannot leverage richer
+multimodal representations.
+
+\subsection{Multimodal Medical AI}
+The MoRE framework~\cite{thapa2024more} aligns ECG, CXR, and clinical text
+embeddings using InfoNCE contrastive learning across a shared 128-dim
+embedding space. It demonstrates that multimodal alignment yields stronger
+representations than any single modality alone.
+
+\subsection{Knowledge Distillation in Medical AI}
+Hossain et al.~\cite{hossain2025} applied multimodal distillation to tumor
+segmentation, aggregating knowledge from multiple modality-specific teacher
+models into a single student with fewer parameters. Application of this
+paradigm to cardiovascular disease with ECG signals remains unexplored.
+
+%% ──────────────────────────────────────────────────────────────
+\section{Proposed Method}
+
+\subsection{Multimodal Teacher}
+The MoRE teacher encodes three modalities:
+\begin{itemize}[noitemsep]
+  \item \textbf{ECG encoder:} ViT-Base with custom Conv1D patch embedding
+        (12-lead, $12\times1000$ input at 100\,Hz).
+  \item \textbf{CXR encoder:} ViT-Base with DropKey attention.
+  \item \textbf{Text encoder:} RoBERTa-base-PM-M3 with LoRA ($r=16$,
+        0.6\% of parameters trainable).
+\end{itemize}
+Modality projectors map each encoder to a shared 128-dim space.
+Pre-training uses InfoNCE contrastive loss across ECG, CXR, and text
+pairs. The teacher ($\sim$280M parameters) is fully frozen during student training.
+
+\subsection{Student Model}
+The student (Figure~\ref{fig:arch}) is a MobileNetV3-Small backbone
+adapted for 1-D single-lead ECG input:
+
+\begin{enumerate}[noitemsep]
+  \item \textbf{Channel adapter:} Conv1d $1\to16\to3$, BN, ReLU — maps
+        single-lead time series to pseudo-3-channel representation.
+  \item \textbf{Backbone:} MobileNetV3-Small (\texttt{timm} library),
+        producing a 576-dim feature vector.
+  \item \textbf{Projector:} Linear $576\to128$, matching teacher embedding
+        dimensionality.
+  \item \textbf{ECG head (primary):} Linear $128\to10$ — 10 ECG rhythm
+        classes.
+  \item \textbf{Pulm head (secondary):} Linear $128\to4$ — 4 CheXpert
+        pulmonary classes, learned indirectly via embedding alignment with
+        the multimodal teacher.
+\end{enumerate}
+Total student parameters: $\sim$2.54M — a 110$\times$ compression of the teacher.
+
+\subsection{Distillation Objectives}
+Training minimizes a weighted combination:
+\begin{equation}
+  \mathcal{L} = \alpha_{\text{ecg}}\,\mathcal{L}_{\text{ecg}}^{\text{BCE}}
+              + \alpha_{\text{pulm}}\,\mathcal{L}_{\text{pulm}}^{\text{BCE}}
+              + \gamma\,\mathcal{L}_{\text{align}}
+\end{equation}
+where $\mathcal{L}_{\text{align}} = 1 - \overline{\cos}(\mathbf{z}_s, \mathbf{z}_t)$
+is the cosine embedding alignment loss. Default weights:
+$\alpha_{\text{ecg}}=1.0$, $\alpha_{\text{pulm}}=0.5$, $\gamma=0.5$.
+Early stopping is on the primary ECG macro AUC (patience 15 epochs).
+
+%% ──────────────────────────────────────────────────────────────
+\section{Progress and Current Results}
+
+\subsection{Phase 0 — Repository Audit and Planning}
+
+A full audit of the MoRE codebase identified several integration barriers
+that required fixing before training could proceed:
+\begin{itemize}[noitemsep]
+  \item Missing imports in \texttt{pretrain\_multimodel.py} (\texttt{torch},
+        \texttt{tqdm}, AMP utilities).
+  \item Early-\texttt{return} bug in \texttt{preprocess\_notes.py}
+        \texttt{get\_clinical\_xray()} causing only one radiology report
+        to be processed instead of iterating all records.
+  \item All data paths hardcoded as relative strings throughout the
+        preprocessing scripts — incompatible with HPC directory layout.
+  \item RoBERTa model path hardcoded in \texttt{utils/build\_model.py}.
+\end{itemize}
+The 49,076-row manifest (\texttt{matched\_patients\_v1.csv}) was audited:
+zero null values, 87.2\% same-day ECG–CXR pairs, unique per-subject.
+An implementation plan, assumptions log, and full SLURM job chain were
+designed prior to writing any training code.
+
+\subsection{Phase 1 — Environment and Reproducibility}
+
+A reproducible HPC environment was established on the Texas A\&M Grace
+cluster (A100 40\,GB GPUs). All configurable paths were centralized into
+\texttt{configs/paths.yaml}. Credentials for PhysioNet download are
+managed via a \texttt{.env} file (never committed). The full project
+directory structure — including \texttt{data/}, \texttt{manifests/},
+\texttt{scripts/}, \texttt{slurm/}, \texttt{configs/}, \texttt{logs/},
+\texttt{outputs/}, and \texttt{distill/} — was created and documented.
+
+\subsection{Phase 2 — Data Procurement (Challenges)}
+
+\textbf{Manifest-driven download.}
+\texttt{scripts/build\_download\_lists.py} generated:
+98,152 ECG file paths (\texttt{.hea} + \texttt{.dat} per record) and
+49,076 CXR JPEG paths, plus all required metadata CSVs
+(\texttt{mimic-cxr-2.0.0-chexpert.csv}, \texttt{mimic-cxr-2.0.0-split.csv},
+\texttt{machine\_measurements.csv}, etc.).
+
+\textbf{HPRC inode quota constraint.}
+The Grace cluster enforces a per-user inode limit ($\sim$1M inodes).
+The combined MIMIC-IV-ECG and MIMIC-CXR-JPG directory tree — including
+radiology report \texttt{.txt} files, metadata CSVs, and signal binaries
+— exceeds this limit. The download SLURM job was terminated by quota
+enforcement before CXR JPEG files or radiology report text files could be
+stored. Table~\ref{tab:download} summarizes the outcome.
+
+\begin{table}[h]
+\caption{Download outcome for 49,076-pair manifest}
+\label{tab:download}
+\begin{tabular}{lrr}
+\toprule
+File type & Downloaded & Missing \\
+\midrule
+ECG metadata CSVs & 2 / 2 & 0 \\
+CXR metadata CSVs & 3 / 3 & 0 \\
+ECG signal files (.hea+.dat) & 28,745 & 20,331 \\
+CXR JPEG images & 0 & 49,076 \\
+Radiology report .txt & 0 & $\sim$49,000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Mitigation strategy.}
+Because the student model uses only ECG signals at inference time, and
+because the teacher embedding cache requires only the teacher's ECG
+encoder (not CXR), the 28,745 downloaded ECG records are sufficient to
+proceed with the distillation pipeline. All 49,076 records remain in
+the \texttt{.npy} preprocessing output (paths stored); records with
+missing ECG files are filtered at dataset load time.
+
+For xray notes (used only in teacher pretraining, not distillation),
+MoRE's built-in CheXpert-label-to-text fallback
+(\texttt{generate\_xray\_note()}) is applied to all records.
+
+\subsection{Phase 3 — MoRE Compatibility and Preprocessing}
+
+\textbf{Bug fixes applied to MoRE:}
+All hardcoded paths were made configurable via \texttt{configs/paths.yaml}.
+The \texttt{preprocess\_notes.py} early-return bug was corrected.
+Missing imports in \texttt{pretrain\_multimodel.py} were added.
+
+\textbf{Item format extension.}
+The original MoRE 6-element item format was extended to 7 elements:
+\begin{center}
+\texttt{[xray\_path, ecg\_stem, xray\_note, ecg\_note, ecg\_labels(10,), pulm\_labels(4,), split]}
+\end{center}
+
+\textbf{ECG rhythm label extraction.}
+The \texttt{machine\_measurements.csv} report columns
+(\texttt{report\_0}–\texttt{report\_6}) were parsed using compiled
+case-insensitive regular expressions to extract 10-class multi-label
+binary rhythm vectors. The ``Normal ECG'' pattern uses a negative
+lookbehind (\texttt{(?<![a-z])normal ecg\textbackslash b}) to avoid
+matching ``Abnormal ECG.'' Table~\ref{tab:ecg_class} shows the class
+distribution across all 49,076 records.
+
+\begin{table}[h]
+\caption{ECG rhythm label distribution across all splits}
+\label{tab:ecg_class}
+\begin{tabular}{lrrr}
+\toprule
+Class & Total & \% of records \\
+\midrule
+Normal & 11,053 & 22.5\% \\
+Sinus tachycardia & 6,720 & 13.7\% \\
+Sinus bradycardia & 4,456 & 9.1\% \\
+Atrial fibrillation & 3,978 & 8.1\% \\
+LVH & 3,863 & 7.9\% \\
+RBBB & 3,345 & 6.8\% \\
+ST ischemia & 2,847 & 5.8\% \\
+AV block & 2,627 & 5.4\% \\
+LBBB & 1,055 & 2.1\% \\
+ST elevation MI & 480 & 1.0\% \\
+\midrule
+No label assigned & 17,166 & 35.0\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The dataset exhibits a notable class imbalance: \textit{ST elevation MI}
+(480 records) and \textit{LBBB} (1,055 records) are severely
+underrepresented. Class-weighted BCE is planned as an ablation.
+35\% of records carry no ECG rhythm label; these contribute to the
+pulmonary head and embedding alignment loss but not the ECG BCE term.
+
+\textbf{Preprocessing output:}
+\begin{center}
+\begin{tabular}{lr}
+Split & Records \\
+\hline
+Train & 48,423 \\
+Val & 379 \\
+Test & 274 \\
+\textbf{Total} & \textbf{49,076} \\
+\end{tabular}
+\end{center}
+
+\subsection{Phase 4 — Teacher ECG Embedding Cache}
+
+\texttt{distill/cache\_teacher\_embeddings.py} runs the frozen MoRE
+teacher's ECG encoder and 128-dim projector over all available ECG
+records in batch mode, saving results to
+\texttt{data/processed/teacher\_ecg\_embeddings.npy}
+($28{,}745 \times 128$, float32, $\sim$14\,MB).
+
+A study-ID index (\texttt{teacher\_ecg\_study\_ids.npy}) enables
+efficient lookup during distillation dataset construction.
+
+\textbf{NaN embedding issue.}
+502 of the 28,745 cached embeddings contained NaN values, caused by
+ViT encoder instability on a small subset of ECG records (likely
+unusual signal morphologies). This would have propagated into the
+embedding alignment loss and produced NaN training losses on the very
+first backward pass. The fix is applied in two layers:
+\begin{enumerate}[noitemsep]
+  \item \textbf{Dataset load:} \texttt{np.nan\_to\_num(raw, nan=0.0)} replaces all NaN embeddings with the zero vector.
+  \item \textbf{Training loop:} A NaN guard (\texttt{if not torch.isfinite(loss): skip batch}) prevents NaN gradient propagation.
+\end{enumerate}
+Gradient clipping (\texttt{clip\_grad\_norm\_, max\_norm=1.0}) is also
+applied as an additional stability measure.
+
+\subsection{Phase 5 — Student Model Design (In Progress)}
+
+The dual-head MobileNetV3-Small student has been fully implemented
+(\texttt{distill/student\_model.py}, \texttt{distill/distill\_dataset.py},
+\texttt{distill/distill\_train.py}, \texttt{distill/evaluate\_student.py}).
+The distillation training SLURM job has been submitted to the Grace
+GPU partition. Full training results and ablation studies will be
+reported in the final submission.
+
+%% ──────────────────────────────────────────────────────────────
+\section{Barriers and New Ideas}
+
+\subsection{Barriers Encountered}
+
+\textbf{HPRC inode quota.} The most significant infrastructure barrier.
+With only 28,745 ECG records available and no CXR files, the training
+set is approximately 59\% of the intended size. Potential resolution
+paths include: (a) requesting a quota increase from HPRC, (b) downloading
+only the specific CXR files needed (already have exact paths), or
+(c) using group-shared scratch storage.
+
+\textbf{NaN teacher embeddings.} A non-obvious signal quality issue
+that would have silently caused all training loss values to be NaN from
+epoch 1. Required numpy-level inspection of the cached embedding array
+to diagnose.
+
+\textbf{SLURM dependency chaining.} Multi-line \texttt{sbatch} output
+broke naive variable capture for job chaining. Fixed by piping through
+\texttt{grep "Submitted batch job" | awk '\{print \$NF\}'}.
+
+\textbf{timm API incompatibility.} The MoRE teacher uses older
+\texttt{timm} API conventions for ViT model creation that were
+deprecated in newer versions. Compatibility shims were added.
+
+\subsection{New Ideas for Ablations}
+
+\textbf{Class-weighted BCE.} ST elevation MI (480 records, 1.0\%) and
+LBBB (1,055 records, 2.1\%) are likely to be underfit with uniform BCE.
+Class weights inversely proportional to frequency will be tested.
+
+\textbf{Multi-lead student.} Instead of a single lead, concatenate
+2–3 leads as input channels. This keeps the student lightweight but
+may substantially improve rhythm classification AUC on complex classes
+like AF and AV block.
+
+\textbf{Soft label distillation.}
+The current implementation uses hard labels for both ECG and pulm heads.
+Adding KL divergence against teacher soft logits (temperature-scaled
+softmax) as proposed in the original plan~\cite{hinton2015distilling}
+may improve calibration and secondary head performance.
+
+%% ──────────────────────────────────────────────────────────────
+\section{Action Items and Expected Outcomes}
+
+\begin{table}[h]
+\caption{Remaining action items and expected outcomes}
+\label{tab:action}
+\begin{tabular}{p{3.5cm}p{4cm}}
+\toprule
+Action item & Expected outcome \\
+\midrule
+Complete distillation run (Lead I baseline) &
+  Per-class ECG AUC-ROC on test set; embedding cosine similarity to teacher \\
+\addlinespace
+Lead ablation (Lead I vs II vs V2) &
+  Identify strongest single lead for ECG rhythm classification \\
+\addlinespace
+Loss weight ablation ($\gamma$, $\alpha_\text{pulm}$) &
+  Quantify contribution of embedding alignment and pulm head to ECG performance \\
+\addlinespace
+Class-weighted BCE &
+  Improve AUC for ST elevation MI and LBBB \\
+\addlinespace
+Teacher linear probe benchmark &
+  Establish ceiling AUC from teacher embeddings alone (LogReg on cached embeddings) \\
+\addlinespace
+Parameter count \& latency measurement &
+  Demonstrate 110$\times$ compression and $<$5\,ms inference on a single ECG record \\
+\addlinespace
+Final report + presentation &
+  April 23–30: write-up with full ablation table, error analysis, conclusion \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%% ──────────────────────────────────────────────────────────────
+\section{Updated Project Timeline}
+
+Figure~\ref{fig:gantt} shows the updated Gantt chart reflecting actual
+execution. The data procurement phase extended beyond the original schedule
+due to the HPRC inode quota issue, which required iterative debugging
+and a revised download strategy. Teacher embedding caching (a new Phase 4
+task not in the original proposal) added $\sim$1 week. Student model
+design, implementation, and initial training are on schedule relative to
+the revised timeline.
+
+\begin{figure}[h]
+\centering
+\fbox{\parbox{0.9\columnwidth}{
+\small
+\textbf{Phase 1 — Planning \& Proposal} \hfill Feb 11 – Mar 2 \checkmark \\[2pt]
+\textbf{Phase 2 — Data \& Teacher Groundwork} \hfill Mar 9 – Apr 4 \\
+\quad 2.1 Data access + manifest audit \hfill \checkmark \\
+\quad 2.2 Download pipeline (partial, inode limit) \hfill \checkmark \\
+\quad 2.3 MoRE preprocessing + ECG label parsing \hfill \checkmark \\
+\quad 2.4 Teacher ECG embedding cache \hfill \checkmark \\[2pt]
+\textbf{Phase 3 — Student Model \& Distillation} \hfill Apr 5 – Apr 22 \\
+\quad 3.1 Student design \& implementation \hfill \checkmark \\
+\quad 3.2 Distillation training (Lead I baseline) \hfill In progress \\
+\quad 3.3 Lead ablation study \hfill Pending \\
+\quad 3.4 Loss ablation study \hfill Pending \\[2pt]
+\textbf{Phase 4 — Results, Polishing, Presentation} \hfill Apr 23 – Apr 30 \\
+\quad 4.1 Final evaluation \& error analysis \hfill Pending \\
+\quad 4.2 Write-up \hfill Pending \\
+\quad 4.3 Presentation \hfill Pending \\
+}}
+\caption{Updated project timeline (as of 2026-03-30)}
+\label{fig:gantt}
+\end{figure}
+
+%% ──────────────────────────────────────────────────────────────
+\section{Individual Contributions}
+
+\textbf{Curtis Choy} led data access and preprocessing infrastructure:
+designed and implemented the manifest-driven download pipeline
+(\texttt{scripts/build\_download\_lists.py},
+\texttt{slurm/download\_subset.slurm}), HPRC environment configuration,
+and the layout verification script. Conducted initial manifest inspection
+and data quality audit.
+
+\textbf{Dhanush Shekar} led modeling and training infrastructure:
+adapted the MoRE framework (bug fixes, path refactoring), implemented
+ECG rhythm label extraction, built the full distillation codebase
+(\texttt{distill/} module), designed the dual-head student architecture,
+authored SLURM job chains for teacher caching and distillation training,
+and diagnosed/fixed the NaN embedding issue.
+
+\textbf{Alexandra Tabacaru} led evaluation design and documentation:
+designed the teacher linear probe benchmark methodology, managed the
+project timeline and updated Gantt chart, wrote and maintained
+\texttt{docs/} documentation, and led early-stopping strategy and
+evaluation metric selection (macro AUC-ROC as primary metric).
+
+%% ──────────────────────────────────────────────────────────────
+\bibliographystyle{ACM-Reference-Format}
+\begin{thebibliography}{9}
+
+\bibitem{who_cvd}
+World Health Organization.
+\newblock Cardiovascular diseases (CVDs).
+\newblock \url{https://www.who.int/news-room/fact-sheets/detail/cardiovascular-diseases-(cvds)}, 2023.
+
+\bibitem{kwok2022}
+Chun Shing Kwok et al.
+\newblock Missed opportunities in the diagnosis of heart failure: Evaluation of pathways to determine sources of delay to specialist evaluation.
+\newblock \textit{Current Heart Failure Reports}, 19(4):247–253, 2022.
+
+\bibitem{naidoo2026}
+Vasanthrie Naidoo, Lavanya Madamshetty, and Suresh Babu Krishna.
+\newblock Artificial intelligence for cardiology: From diagnosis to management.
+\newblock \textit{Therapeutic Advances in Cardiovascular Disease}, 20, 2026.
+
+\bibitem{thapa2024more}
+Samrajya Thapa, Koushik Howlader, Subhankar Bhattacharjee, and Wei le.
+\newblock MoRE: Multi-modal contrastive pre-training with transformers on X-rays, ECGs, and diagnostic report.
+\newblock \textit{arXiv preprint arXiv:2410.16239}, 2024.
+
+\bibitem{hossain2025}
+Khondker Fariha Hossain, Sharif Amit Kamran, Joshua Ong, and Alireza Tavakkoli.
+\newblock Enhancing efficient deep learning models with multimodal, multi-teacher insights for medical image segmentation.
+\newblock \textit{Scientific Reports}, 15(1), 2025.
+
+\bibitem{avanzato2020}
+Avanzato R and Beritelli F.
+\newblock Automatic ECG diagnosis using convolutional neural network.
+\newblock \textit{Electronics}, 9(6):951, 2020.
+
+\bibitem{noor2025}
+Noor N, Bilal M, Abbasi SF, Pournik O, and Arvanitis TN.
+\newblock A novel transformer-based approach for cardiovascular disease detection.
+\newblock \textit{Frontiers in Digital Health}, 7:1548448, 2025.
+
+\bibitem{hinton2015distilling}
+Geoffrey Hinton, Oriol Vinyals, and Jeff Dean.
+\newblock Distilling the knowledge in a neural network.
+\newblock \textit{arXiv preprint arXiv:1503.02531}, 2015.
+
+\end{thebibliography}
+
+\end{document}

@@ -1,9 +1,7 @@
 # Assumptions and Open Questions
 
-**Date:** 2026-03-28
-**Updated by:** Phase 0 inspection
-
-This file records explicit assumptions made during implementation where the ground truth was not directly verifiable at the time. Each assumption should be validated before use in training.
+**Date created:** 2026-03-28
+**Last updated:** 2026-03-30
 
 ---
 
@@ -11,113 +9,111 @@ This file records explicit assumptions made during implementation where the grou
 
 **Assumption:** All MIMIC-IV-ECG records in our manifest are sampled at 500 Hz, yielding 5000 samples for a 10-second recording.
 
-**Why it matters:** MoRE applies `resample_poly(x, up=1, down=5)` which assumes 500 Hz input to produce 1000-sample output at 100 Hz. If a record is at a different rate, the shape will be wrong.
+**Why it matters:** MoRE applies `resample_poly(x, up=1, down=5)` to produce 1000-sample output at 100 Hz. Wrong rate → wrong shape.
 
-**How to validate:** Run `wfdb.rdheader(stem)['fs']` on a sample of downloaded records. Expected: `fs == 500`.
-
-**Status:** Unverified — validate after first batch download.
+**Status:** ✅ **Confirmed** — verified on downloaded records, all at 500 Hz. `resample_poly` produces `(12, 1000)` as expected.
 
 ---
 
 ## A2 — CheXpert Labels Joinable via subject_id + cxr_study_id
 
-**Assumption:** Every CXR in our manifest has a corresponding row in `mimic-cxr-2.0.0-chexpert.csv`, joinable on `subject_id` and `study_id` (= `cxr_study_id` in our manifest).
+**Assumption:** Every CXR in our manifest has a corresponding row in `mimic-cxr-2.0.0-chexpert.csv`, joinable on `subject_id` and `study_id`.
 
-**Why it matters:** MoRE uses CheXpert labels (14 pathology labels) as the supervised signal for fine-tuning and as item metadata in the `.npy` file.
+**Fallback:** Zero-vector ("No Finding") for any study missing from the chexpert file.
 
-**Fallback:** If a study is missing from the chexpert file, use a zero-vector (= "No Finding") and log a warning.
-
-**Status:** Unverified — validate during `convert_manifest_to_more_format.py`.
+**Status:** ✅ **Confirmed** — join succeeded for all 49,076 rows. No zero-vector fallback needed for CheXpert labels.
 
 ---
 
 ## A3 — Official MIMIC-CXR Split Covers Our Manifest
 
-**Assumption:** The `mimic-cxr-2.0.0-split.csv` file contains entries for all `dicom_id` values in our manifest CXR paths.
+**Assumption:** `mimic-cxr-2.0.0-split.csv` contains entries for all `dicom_id` values in our manifest.
 
-**Why it matters:** MoRE filters `train_data = [item for item in data_new if item[5] == 'train']`. Samples with no split assignment would be silently dropped.
+**Fallback:** Assign to 'train' if not found.
 
-**Fallback:** Assign to 'train' if `dicom_id` not found in split file. Log count.
-
-**Status:** Unverified — validate during conversion step.
+**Status:** ✅ **Confirmed** — split file covers all manifest rows. Resulting distribution: 48,423 train / 379 val / 274 test.
 
 ---
 
 ## A4 — Radiology Report Text Availability
 
-**Assumption:** Most CXR studies in our manifest have associated `.txt` radiology reports under the MIMIC-CXR `files/` tree. The `preprocess_notes.py` `get_clinical_xray()` function extracts FINDINGS + IMPRESSION sections.
+**Assumption:** Most CXR studies have associated `.txt` radiology reports under the MIMIC-CXR `files/` tree.
 
-**Fallback (already in MoRE code):** If no report text, fall back to synthetic note constructed from CheXpert labels via `generate_xray_note()`.
+**Status:** ❌ **Not applicable** — CXR `.txt` report files were not downloaded (inode quota exhausted). The CheXpert-label-to-text fallback (`generate_xray_note()`) is used for all 49,076 records.
 
-**Coverage estimate:** MIMIC-CXR has ~95% report coverage. A small fraction may be empty.
-
-**Status:** Accept MoRE fallback logic. No change needed unless coverage is unexpectedly low.
+**Impact:** Xray notes are synthetic (label-derived), not from actual radiology reports. This is consistent with how MoRE handles missing notes, but reduces text modality richness.
 
 ---
 
 ## A5 — ECG Machine Report Availability
 
-**Assumption:** `machine_measurements.csv` has rows for all `ecg_study_id` values in our manifest, and `report_0`–`report_6` are populated (at least partially).
+**Assumption:** `machine_measurements.csv` has rows for all `ecg_study_id` values in our manifest.
 
-**Fallback:** If ECG report is empty after join, use `"ECG note not available."` (same as MoRE default in `process_item()`).
+**Status:** ✅ **Confirmed** — `machine_measurements.csv` downloaded and joined successfully. Report columns `report_0`–`report_6` populated for all manifest rows (some records have empty report strings, in which case ECG note defaults to `"ECG note not available."`).
 
-**Status:** Unverified — validate during conversion step.
+**Additional work:** ECG report text was extended beyond note generation to extract 10-class rhythm labels via regex matching.
 
 ---
 
 ## A6 — One JPG per CXR Study (PA or AP view)
 
-**Assumption:** Each row in our manifest corresponds to exactly one JPEG file (PA or AP frontal view). The `cxr_path` field already encodes the specific dicom_id, so there is no ambiguity.
+**Status:** ✅ **Confirmed** — manifest `cxr_path` includes the full dicom_id filename, uniquely identifying one image per study. No ambiguity.
 
-**Why it matters:** MIMIC-CXR studies can have multiple views (PA, lateral). MoRE filters to PA/AP in `preprocess_data.py`. Our manifest has pre-selected a specific file per study.
-
-**Status:** Confirmed from manifest inspection — `cxr_path` includes the full dicom_id filename.
+**Note:** CXR files were not downloaded due to inode quota. Paths are stored in the `.npy` files but files do not exist on disk.
 
 ---
 
 ## A7 — ECG WFDB Records Have 12 Leads
 
-**Assumption:** All MIMIC-IV-ECG records are 12-lead ECGs. The dataset documentation states this, and MoRE hardcodes 12-lead processing throughout.
-
-**Why it matters:** `ViTModelEcg` and `PatchEmbed` assume `(12, 1000)` input shape.
-
-**Status:** Confirmed by MIMIC-IV-ECG documentation. Low risk.
+**Status:** ✅ **Confirmed** — all downloaded MIMIC-IV-ECG records are 12-lead. `ViTModelEcg` input shape `(12, 1000)` works correctly.
 
 ---
 
 ## A8 — Local Data Root Structure
 
-**Assumption:** Downloaded files will be stored under:
-- ECG: `data/mimic-iv-ecg/files/...`
-- CXR: `data/mimic-cxr-jpg/files/...`
-
-And the absolute paths stored in the `.npy` file will use these roots.
-
-**Action required:** `configs/paths.yaml` must set `ecg_root` and `cxr_root` to absolute paths on this HPC system. The `.npy` file must use these absolute paths.
-
-**Status:** Will be handled by `configs/paths.yaml` in Phase 1.
+**Status:** ✅ **Resolved** — `configs/paths.yaml` defines `ecg_root` and `cxr_root` as absolute paths. The `.npy` files store absolute paths built at preprocessing time.
 
 ---
 
 ## A9 — preprocess_notes.py Bug
 
-**Known bug:** `preprocess_notes.py` line 75 references `clinical_xray` (output of `get_clinical_xray()`) outside the function, but `get_clinical_xray()` has an early `return` inside the for loop (line 49), meaning only the first `.txt` file is ever processed. This is almost certainly a bug — the `return` should be `break` or the return should be outside the loop.
+**Known bug:** Early `return` inside `get_clinical_xray()` loop (should be `break`).
 
-**Action:** Fix in Phase 3 minimal refactor. Do not use the original `preprocess_notes.py` for text extraction — re-implement this step in `scripts/convert_manifest_to_more_format.py` with the correct logic.
-
-**Status:** Known defect — will be fixed.
+**Status:** ✅ **Fixed** — bug patched in Phase 3 minimal refactor. Preprocessing re-implemented in `scripts/convert_manifest_to_more_format.py` with correct logic.
 
 ---
 
 ## A10 — pretrain_multimodel.py Missing Imports
 
-**Known issue:** `pretrain_multimodel.py` is missing the following imports at the top of the file:
-- `import torch`
-- `from torch.cuda.amp import autocast, GradScaler`
-- `import torch.nn as nn`
-- `from tqdm import tqdm`
-- `args.epochs` is referenced but `--epochs` is not added to argparse
+**Known issue:** Missing `torch`, `tqdm`, `autocast`, `GradScaler`, `nn` imports; missing `--epochs` argparse arg.
 
-**Action:** Fix in Phase 3 minimal refactor before smoke test.
+**Status:** ✅ **Fixed** — all imports added, `--epochs` added to argparse.
 
-**Status:** Known defect — will be fixed.
+---
+
+## A11 — HPRC Inode Quota (discovered during Phase 2)
+
+**Issue:** Grace cluster enforces a per-user inode limit. Full MIMIC-CXR-JPG + MIMIC-IV-ECG download (~150K+ files) exhausted quota before CXR images could be stored.
+
+**Impact:**
+- CXR JPEG files: 0 / 49,076 downloaded
+- ECG signal files: 28,745 / 49,076 downloaded (20,331 missing)
+- Radiology report .txt files: 0 downloaded
+
+**Mitigation:**
+- Distillation pipeline uses ECG only for the student
+- Teacher embedding cache uses teacher's ECG encoder only (no CXR needed)
+- 28,745 available ECG records are sufficient for viable distillation training
+- All 49,076 records still in `.npy` files (paths present); missing-file records are filtered at dataset load time
+
+**Status:** ⚠️ **Working around** — pipeline is viable with partial ECG-only data. Full CXR download would require either (a) requesting quota increase from HPRC, or (b) downloading to a shared group scratch space.
+
+---
+
+## A12 — NaN Teacher Embeddings (discovered during Phase 4)
+
+**Issue:** 502 of 28,745 teacher ECG embeddings contained NaN values — caused by ViT encoder instability on certain ECG records (likely unusual signal morphologies or signal quality issues).
+
+**Mitigation:** `np.nan_to_num(raw, nan=0.0, posinf=0.0, neginf=0.0)` applied at dataset load time in `distill/distill_dataset.py`. NaN batch guard in training loop (`if not torch.isfinite(loss): skip`).
+
+**Status:** ✅ **Fixed**

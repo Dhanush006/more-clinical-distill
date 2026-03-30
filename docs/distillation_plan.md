@@ -1,5 +1,7 @@
 # Distillation Plan
 
+**Last updated:** 2026-03-30
+
 **Goal:** Compress MoRE's multimodal teacher (ECG + CXR + Text, ~280M params)
 into a lightweight single-lead ECG student (MobileNetV3-Small, ~2.54M params)
 that retains strong CVD classification performance from a single lead.
@@ -20,105 +22,150 @@ that retains strong CVD classification performance from a single lead.
 | Input ECG    | 12-lead, (12, 1000) at 100 Hz |
 | Total params | ~280M |
 
-### Student — MobileNetV3-Small
+Teacher weights: pre-trained MoRE weights downloaded from Google Drive (see original MoRE README).
+Teacher is fully frozen during student training.
+
+### Student — MobileNetV3-Small (implemented)
 
 | Component | Details |
 |---|---|
-| Input         | Single-lead ECG (Lead I by default), shape (1, 1000) |
-| Channel adapter | Conv1D: 1→16→3 (adapts single lead to 3-channel for backbone) |
-| Backbone      | MobileNetV3-Small (timm `mobilenetv3_small_100`) |
-| Projector     | Linear(576→256→128) — matches teacher ECG projector output dim |
-| Classifier    | Linear(128→4) — 4 CheXpert labels |
+| Input         | Single-lead ECG (Lead I), shape (1, 1000) at 100 Hz |
+| Channel adapter | Conv1d 1→16, BN, ReLU, Conv1d 16→3, BN, ReLU |
+| Backbone      | MobileNetV3-Small (timm `mobilenetv3_small_100`, 2D conv treated as temporal) |
+| Projector     | Linear(576→128) — matches teacher ECG projector output dim |
+| ECG head      | Linear(128→10) — 10 ECG rhythm classes (primary) |
+| Pulm head     | Linear(128→4) — 4 CheXpert pulmonary classes (secondary, via distillation) |
 | Total params  | ~2.54M |
 
 ---
 
-## Distillation Losses
+## ECG Rhythm Classification Labels (Primary Head)
 
-```
-L = α·L_task + β·L_kl + γ·L_align + δ·L_xmodal
-```
+10-class multi-label binary vector parsed from `machine_measurements.csv` free-text reports:
 
-| Term | Formula | Purpose |
-|---|---|---|
-| `L_task` | BCE(student_logits, labels) | Supervised CVD classification |
-| `L_kl` | KL(σ(teacher_logits/T) ‖ σ(student_logits/T)) | Soft label transfer (T=4) |
-| `L_align` | 1 − CosineSim(student_emb, teacher_ecg_emb) | Embedding space alignment |
-| `L_xmodal` | MSE(student similarity matrix, teacher ECG-CXR sim matrix) | Preserve cross-modal structure |
+| Index | Class | Records | % |
+|---|---|---|---|
+| 0 | Normal | 11,053 | 22.5% |
+| 1 | Sinus bradycardia | 4,456 | 9.1% |
+| 2 | Sinus tachycardia | 6,720 | 13.7% |
+| 3 | Atrial fibrillation | 3,978 | 8.1% |
+| 4 | LBBB | 1,055 | 2.1% |
+| 5 | RBBB | 3,345 | 6.8% |
+| 6 | ST elevation MI | 480 | 1.0% |
+| 7 | ST ischemia | 2,847 | 5.8% |
+| 8 | AV block | 2,627 | 5.4% |
+| 9 | LVH | 3,863 | 7.9% |
 
-Default weights: α=1.0, β=0.5, γ=0.5, δ=0.3 (tune via ablation).
+35% of records have no ECG rhythm label assigned (these contribute only via pulm head and alignment loss).
+
+## Pulmonary Classification Labels (Secondary Head)
+
+4-class CheXpert labels joined from `mimic-cxr-2.0.0-chexpert.csv`:
+`Atelectasis, Cardiomegaly, Edema, Pleural Effusion`
 
 ---
 
-## Training Data
+## Distillation Losses (Implemented)
 
-- Same 49,076 matched subjects from `matched_patients_v1.csv`
-- Student uses **ECG only** — no CXR or text at inference time
-- Teacher embeddings are **pre-computed and cached** before distillation training
-  (avoids re-running teacher forward pass every step)
+```
+L = alpha_ecg × L_ecg_BCE  +  alpha_pulm × L_pulm_BCE  +  gamma × L_align
+```
 
-### Lead Ablation Study
+| Term | Formula | Weight | Purpose |
+|---|---|---|---|
+| `L_ecg_BCE` | BCE(ecg_logits, ecg_labels) | 1.0 | Supervised ECG rhythm classification |
+| `L_pulm_BCE` | BCE(pulm_logits, pulm_labels) | 0.5 | Supervised pulmonary distillation |
+| `L_align` | 1 − CosineSim(student_emb, teacher_ecg_emb) | 0.5 | Embedding space alignment |
 
-Train three separate students to compare lead quality:
+**Note on original plan:** The proposal included `L_kl` (soft logit KL divergence) and `L_xmodal` (cross-modal similarity matching). These were simplified in implementation:
+- `L_kl` replaced by hard-label BCE on teacher-derived soft labels (more stable with frozen teacher)
+- `L_xmodal` deferred — requires CXR embeddings which are unavailable due to missing CXR files
 
-| Variant | Lead index | Name |
+**Training stability fixes:**
+- NaN guard: skip batch if loss is non-finite
+- Gradient clipping: `clip_grad_norm_(max_norm=1.0)` before optimizer step
+- Teacher embedding sanitization: `np.nan_to_num(raw, nan=0.0)` at load time (502 NaN rows in cache)
+
+---
+
+## Training Setup
+
+- Optimizer: AdamW (lr=1e-4, weight_decay=1e-4)
+- LR schedule: CosineAnnealingWarmRestarts (T_0=10)
+- AMP: bfloat16 mixed precision via `torch.cuda.amp.GradScaler`
+- Early stopping: on ECG macro AUC, patience=15 epochs
+- Batch size: 128
+- Max epochs: 100
+- Hardware: 1× A100 40GB (Grace cluster)
+
+---
+
+## Evaluation (Benchmark Design)
+
+`distill/evaluate_student.py` computes:
+1. **Student AUC-ROC** per class + macro for both heads on val and test sets
+2. **Teacher linear probe** — `MultiOutputClassifier(LogisticRegression)` fit on teacher train embeddings, evaluated on test/val. Represents the ceiling achievable from teacher ECG embeddings alone.
+3. **Embedding cosine similarity** — mean cosine sim between student and teacher embeddings on test set
+
+---
+
+## Planned Ablations
+
+### Lead Ablation
+Train three student variants to compare single-lead performance:
+
+| Variant | Lead index | Notes |
 |---|---|---|
-| Lead I  | 0 | Standard limb lead |
+| Lead I  | 0 | Standard limb lead (current default) |
 | Lead II | 1 | Often used in rhythm strips |
-| V2      | 7 | Precordial, good for LV |
+| V2      | 7 | Precordial, good for ventricular signals |
 
----
+### Loss Weight Ablation
+Vary `alpha_pulm` (0.0, 0.25, 0.5, 1.0) and `gamma` (0.0, 0.25, 0.5, 1.0):
+- `alpha_pulm=0` tests ECG-only training (no pulm distillation)
+- `gamma=0` tests task-only training (no embedding alignment)
 
-## Evaluation
-
-- **Primary metric:** AUC-ROC on test set for each of the 4 CheXpert labels
-- **Baseline comparison:**
-  - Teacher (MoRE ECG encoder only, 12-lead)
-  - GLoRIA (CXR-text baseline from MoRE paper)
-  - MedKLIP
-- **Lead ablation:** compare Lead I vs II vs V2 student performance
+### Class Imbalance
+Test class-weighted BCE for ECG head (weights inversely proportional to class frequency) to improve performance on ST elevation MI (480 records) and LBBB (1,055 records).
 
 ---
 
 ## File Map
 
-| File | Purpose |
-|---|---|
-| `distill/student_model.py` | MobileNetV3-Small 1-D ECG student |
-| `distill/distill_dataset.py` | Dataset: (single-lead ECG, teacher_emb, labels) |
-| `distill/distill_train.py` | Training loop with 4-term loss |
-| `configs/distill_config.yaml` | All hyperparameters |
-| `slurm/distill_train.slurm` | SLURM job (24h, 1×A100) |
+| File | Purpose | Status |
+|---|---|---|
+| `distill/student_model.py` | MobileNetV3-Small dual-head student | ✅ Done |
+| `distill/distill_dataset.py` | Dataset: (single-lead ECG, teacher_emb, ecg_labels, pulm_labels) | ✅ Done |
+| `distill/distill_train.py` | Training loop with dual-head loss | ✅ Done |
+| `distill/evaluate_student.py` | Benchmark: student vs teacher linear probe | ✅ Done |
+| `distill/cache_teacher_embeddings.py` | Pre-compute teacher ECG embeddings | ✅ Done |
+| `configs/distill_config.yaml` | All hyperparameters | ✅ Done |
+| `slurm/distill_train.slurm` | SLURM job (GPU, 8h) | ✅ Done |
+| `slurm/evaluate_student.slurm` | SLURM evaluation job | ✅ Done |
 
 ---
 
 ## Execution Order
 
 ```
-1. Run Phase 4 smoke test → confirm teacher loads correctly
-   sbatch slurm/smoke_test.slurm
+1. Download teacher weights (pre-trained MoRE from Google Drive)
+   → outputs/teacher/best_multimodel.pth
 
-2. Pre-train teacher (or load pre-trained weights from Readme.md link)
-   sbatch slurm/pretrain.slurm   # (future Phase 4 full run)
+2. Cache teacher ECG embeddings
+   sbatch slurm/cache_teacher_embeddings.slurm
+   → data/processed/teacher_ecg_embeddings.npy  (28,745 × 128)
 
-3. Cache teacher ECG embeddings
-   python distill/cache_teacher_embeddings.py   # (to be implemented)
-
-4. Run distillation
+3. Run distillation training
    sbatch slurm/distill_train.slurm
+   → outputs/distill/student_best_ep{N}_ecgauc{X}.pth
 
-5. Evaluate & lead ablation
-   python distill/evaluate.py --lead 0  # Lead I
-   python distill/evaluate.py --lead 1  # Lead II
-   python distill/evaluate.py --lead 7  # V2
+4. Run evaluation benchmark
+   sbatch slurm/evaluate_student.slurm
+   → logs/eval_{jobid}.log (per-class AUC comparison table)
+
+5. Lead ablation (pending)
+   Modify distill_config.yaml input_leads, resubmit
+
+6. Loss weight ablation (pending)
+   Modify loss_weights in config, resubmit
 ```
-
----
-
-## Open Items
-
-- [ ] `distill/cache_teacher_embeddings.py` — batch inference script for teacher ECG embeddings
-- [ ] `distill/evaluate.py` — AUC-ROC evaluation + lead ablation
-- [ ] Implement `L_xmodal` (cross-modal similarity matching) — requires CXR embeddings alongside ECG
-- [ ] Tune loss weights α, β, γ, δ via small grid search
-- [ ] Decide on KL temperature T (default 4.0 per Hinton et al.)

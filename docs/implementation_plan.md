@@ -1,238 +1,175 @@
 # Implementation Plan: more-clinical-distill
 
-**Date:** 2026-03-28
+**Date created:** 2026-03-28
+**Last updated:** 2026-03-30
 **Branch:** more-KD
-**Goal:** Manifest-driven multimodal pipeline → MoRE pretraining → Knowledge distillation scaffold
+**Goal:** Manifest-driven multimodal pipeline → MoRE teacher ECG embedding cache → Knowledge distillation into single-lead ECG student
 
 ---
 
-## Overview
+## Status Summary
 
-This plan covers 5 phases. Each phase builds on the previous. The immediate deliverable is a working, smoke-testable MoRE pipeline fed by a selective subset download from PhysioNet, guided by `matched_patients_v1.csv`.
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Phase 0 — Inspect and Plan | ✅ COMPLETE | Repo audit, manifest audit, assumptions documented |
+| Phase 1 — Environment Setup | ✅ COMPLETE | Conda env, configs, folder structure |
+| Phase 2 — Download Pipeline | ✅ COMPLETE (partial data) | Hit HPRC inode quota; 28,745/49,076 ECG files obtained |
+| Phase 3 — MoRE Compatibility | ✅ COMPLETE | .npy splits generated; ECG rhythm labels added |
+| Phase 4 — Teacher Embedding Cache | ✅ COMPLETE | 28,745 × 128-dim float32 embeddings cached |
+| Phase 5 — Distillation | 🔄 IN PROGRESS | Student model implemented; training submitted |
 
 ---
 
 ## Phase 0 — Inspect and Plan ✅ COMPLETE
 
 **Deliverables:**
-- [x] `docs/repo_audit.md`
-- [x] `docs/manifest_audit.md`
-- [x] `docs/implementation_plan.md`
+- [x] `docs/repo_audit.md` — full audit of MoRE repo structure, hardcoding issues, bugs
+- [x] `docs/manifest_audit.md` — 49,076 matched pairs, column analysis, path formats
+- [x] `docs/assumptions.md` — explicit assumptions with validation status
+- [x] `docs/implementation_plan.md` — this file
 
 **Key findings:**
-- MoRE expects a `.npy` file of `[xray_path, ecg_stem, xray_note, ecg_note, labels, split]` tuples
-- ECG files are WFDB format (`.hea` + `.dat`), loaded with `wfdb.rdsamp(stem)`
-- CXR images are JPEG, loaded with PIL
-- Text model is RoBERTa-base-PM-M3, loaded from `./data/RoBERTa-base-PM-M3/`
-- Multiple hardcoded paths and missing imports in original scripts must be fixed
-- Manifest has 49,076 matched pairs, 0 nulls, all unique subjects
+- MoRE expects `.npy` items of the form `[xray_path, ecg_stem, xray_note, ecg_note, labels, split]`
+- ECG files: WFDB format (`.hea` + `.dat`), loaded with `wfdb.rdsamp(stem)`
+- CXR images: JPEG, loaded with PIL; X-ray notes: from radiology `.txt` files
+- Text model: RoBERTa-base-PM-M3, hardcoded path requiring refactor
+- Multiple hardcoded paths and missing imports in original scripts
+- Manifest: 49,076 matched pairs, 0 nulls, all unique subjects, 87.2% same-day pairs
 
 ---
 
-## Phase 1 — Environment and Reproducibility
+## Phase 1 — Environment and Reproducibility ✅ COMPLETE
 
-### Folder Structure to Create
-```
-more-clinical-distill/
-├── data/
-│   ├── mimic-iv-ecg/          # Downloaded ECG .hea/.dat files + metadata CSVs
-│   ├── mimic-cxr-jpg/         # Downloaded CXR .jpg files + metadata CSVs
-│   └── processed/             # MoRE-format .npy output files
-├── manifests/                 # Derived file lists for downloads
-├── scripts/                   # Python and shell scripts
-├── slurm/                     # Slurm job scripts
-├── logs/                      # Run logs
-├── configs/                   # YAML config files
-├── docs/                      # Documentation (this folder)
-├── outputs/                   # Model checkpoints and results
-└── distill/                   # Placeholder for distillation phase
-```
-
-### Files to Create
-1. `.gitignore` — exclude `data/`, `outputs/`, `logs/`, `*.npy`, `*.pth`, secrets
-2. `configs/paths.yaml` — all configurable paths in one place
-3. `.env.example` — credential template (never commit `.env`)
-4. `README.md` update — setup flow for HPC
+**Deliverables:**
+- [x] Folder structure: `data/`, `manifests/`, `scripts/`, `slurm/`, `configs/`, `logs/`, `outputs/`, `distill/`
+- [x] `configs/paths.yaml` — all configurable data paths
+- [x] `.env.example` — credential template (PHYSIONET_USER / PHYSIONET_PASS)
+- [x] `.gitignore` — excludes `data/`, `outputs/`, `logs/`, `*.npy`, `*.pth`, `.env`
+- [x] Conda env: `deepship_xares2` on Grace HPC (A100 40GB)
 
 ---
 
-## Phase 2 — Manifest-Driven Download Pipeline
+## Phase 2 — Manifest-Driven Download Pipeline ✅ COMPLETE (partial data)
 
-### Scripts to Create
+**Scripts created:**
+- `scripts/build_download_lists.py` — generates `manifests/ecg_files.txt` (98,152 paths) and `manifests/cxr_files.txt` (49,076 paths)
+- `slurm/download_subset.slurm` — authenticated wget download job using `.env` credentials
 
-#### `scripts/inspect_manifest.py`
-- Load `matched_patients_v1.csv` safely
-- Validate columns: `subject_id`, `ecg_path`, `cxr_path`, `ecg_date`, `cxr_date`, `day_diff`
-- Report: row count, null counts, path format, duplicate subjects
-- Output summary to stdout and `logs/manifest_inspection.txt`
+**Outcome:**
+- ECG metadata CSVs downloaded: `machine_measurements.csv`, `record_list.csv`
+- CXR metadata CSVs downloaded: `mimic-cxr-2.0.0-chexpert.csv`, `mimic-cxr-2.0.0-split.csv`, `mimic-cxr-2.0.0-metadata.csv`
+- **ECG signal files**: 28,745 / 49,076 studies downloaded (20,331 missing)
+- **CXR image files**: 0 / 49,076 downloaded — inode quota exhausted
+- **Radiology report .txt files**: not downloaded — inode quota exhausted
 
-#### `scripts/build_download_lists.py`
-- Input: `matched_patients_v1.csv` + `configs/paths.yaml`
-- For each ECG row: emit `{ecg_path}.hea` and `{ecg_path}.dat`
-- For each CXR row: emit `{cxr_path}`
-- Also emit paths for required metadata files:
-  - `mimic-cxr-2.0.0-metadata.csv`
-  - `mimic-cxr-2.0.0-split.csv`
-  - `mimic-cxr-2.0.0-chexpert.csv`
-  - `machine_measurements.csv`
-  - `record_list.csv`
-  - Radiology report `.txt` files (by study_id from manifest)
-- Output: `manifests/ecg_files.txt`, `manifests/cxr_files.txt`
-- Deduplication: ensure no repeated download paths
-- Logging: print total file counts
+**HPRC Inode Quota Issue:**
+The Grace cluster enforces a per-user inode limit (~1M inodes). The MIMIC-CXR-JPG directory tree alone spans ~200K+ files/directories. The ECG + CXR + metadata files together exceed quota. Download was terminated after ECG signal files were partially obtained. CXR JPEG files could not be stored.
 
-#### `scripts/download_subset.sh`
-- Read credentials from environment (never hardcoded): `$PHYSIONET_USER`, `$PHYSIONET_PASS`
-- Loop over `manifests/ecg_files.txt` and `manifests/cxr_files.txt`
-- Use `wget` with:
-  - `--user` / `--password` from env
-  - `--no-clobber` (skip if file exists)
-  - `--directory-prefix` to set local root
-  - `--tries=3` (retry on failure)
-- Log failed downloads to `logs/download_failures.txt`
-- Resume-safe by design
-
-#### `slurm/download_subset.slurm`
-- Partition, account, walltime as configurable placeholders
-- Sets `PHYSIONET_USER` and `PHYSIONET_PASS` from a sourced `.env` file
-- Calls `scripts/download_subset.sh`
-- Redirects output to `logs/slurm_download_%j.out`
+**Mitigation:**
+- For the distillation pipeline, the student uses ECG only — CXR files are not needed at inference time
+- Teacher embedding caching (Phase 4) runs teacher's ECG encoder only — no CXR files needed
+- The 28,745 available ECG records are sufficient for distillation training
+- Preprocessing uses label-derived xray notes (CheXpert-label-to-text fallback built into MoRE) for all records
 
 ---
 
-## Phase 3 — MoRE Compatibility Layer
+## Phase 3 — MoRE Compatibility Layer ✅ COMPLETE
 
-### Scripts to Create
+**Scripts created:**
+- `scripts/verify_local_dataset_layout.py` — checks file existence for all manifest rows; outputs `logs/layout_verification.txt`
+- `scripts/convert_manifest_to_more_format.py` — full preprocessing pipeline
 
-#### `scripts/verify_local_dataset_layout.py`
-- Input: `matched_patients_v1.csv` + `configs/paths.yaml`
-- Check for each row:
-  - ECG: `{ecg_root}/{ecg_path}.hea` exists
-  - ECG: `{ecg_root}/{ecg_path}.dat` exists
-  - CXR: `{cxr_root}/{cxr_path}` exists
-- Report: counts of missing files, list of missing paths
-- Output: `logs/dataset_layout_check.txt`
-- Exit code 1 if any missing files
+**Key changes to item format:**
+Original MoRE 6-element item:
+```python
+[xray_path, ecg_stem, xray_note, ecg_note, pulm_labels(4,), split]
+```
 
-#### `scripts/convert_manifest_to_more_format.py`
-- Input:
-  - `matched_patients_v1.csv`
-  - `data/mimic-cxr-jpg/mimic-cxr-2.0.0-chexpert.csv`
-  - `data/mimic-cxr-jpg/mimic-cxr-2.0.0-split.csv`
-  - `data/mimic-cxr-jpg/mimic-cxr-2.0.0-metadata.csv`
-  - `data/mimic-iv-ecg/machine_measurements.csv`
-  - Radiology report `.txt` files
-- Operations:
-  1. Join CheXpert labels via `subject_id` + `study_id`
-  2. Join official split via `dicom_id`
-  3. Build xray note from radiology report text (FINDINGS + IMPRESSION)
-  4. Build ecg note from `machine_measurements.csv` `merged_report`
-  5. Construct absolute file paths
-  6. Produce item per row: `[xray_path, ecg_stem, xray_note, ecg_note, labels_array, split]`
-  7. Save to `data/processed/xray_ecg_notes_labels.npy`
-- Logging: report counts per split, missing labels, missing notes
+Our extended 7-element item:
+```python
+[xray_path, ecg_stem, xray_note, ecg_note, ecg_labels(10,), pulm_labels(4,), split]
+```
 
-#### `scripts/run_preprocessing_pipeline.sh`
-- Wrapper that runs:
-  1. `python scripts/verify_local_dataset_layout.py` — abort if fails
-  2. `python scripts/convert_manifest_to_more_format.py`
-- Logs each stage to `logs/preprocessing_{timestamp}.txt`
-- Exits immediately on error (set -e)
+**ECG Rhythm Label Parsing:**
+Added regex-based parsing of `machine_measurements.csv` free-text report fields into 10-class multi-label binary vectors. Classes:
+`Normal, Sinus bradycardia, Sinus tachycardia, Atrial fibrillation, LBBB, RBBB, ST elevation MI, ST ischemia, AV block, LVH`
 
-### Required Minimal Refactors to MoRE
-These are the minimum changes needed to run MoRE on our data without rewriting it:
+**MoRE bug fixes applied:**
+- `preprocess_notes.py`: Fixed early `return` inside loop (should be `break`) in `get_clinical_xray()`
+- `pretrain_multimodel.py`: Added missing imports (`torch`, `tqdm`, `autocast`, `GradScaler`, `nn`), added `--epochs` argparse argument
+- `utils/build_model.py`: Made RoBERTa model path configurable via `configs/paths.yaml`
 
-1. **`utils/build_model.py`:** Make RoBERTa path configurable (read from `configs/paths.yaml`)
-2. **`pretrain_multimodel.py`:** Add missing imports (`torch`, `tqdm`, `autocast`, `GradScaler`, `nn`), add `--epochs` argument
-3. **`preprocessing/preprocess_notes.py`:** Fix early return bug in `get_clinical_xray()`
+**Output:**
+
+| Split | Records |
+|-------|---------|
+| Train | 48,423 |
+| Val | 379 |
+| Test | 274 |
+| **Total** | **49,076** |
+
+Note: All records are in the `.npy` files (paths stored), but only 28,745 ECG records have downloadable signal files. Records with missing ECG files are filtered out during distillation dataset loading.
 
 ---
 
-## Phase 4 — Smoke Test
+## Phase 4 — Teacher ECG Embedding Cache ✅ COMPLETE
 
-### Smoke Test Strategy
-- Use 50-100 samples from the manifest (first N rows, preferably same-day pairs)
-- Verify:
-  1. ECG loads correctly (wfdb.rdsamp returns valid shape)
-  2. CXR loads and preprocesses to (3, 224, 224) tensor
-  3. Notes tokenize to (512,) token IDs
-  4. One forward pass through MultiModal model succeeds
-  5. InfoNCE loss is computed without NaN
+**Script:** `distill/cache_teacher_embeddings.py`
+**SLURM job:** `slurm/cache_teacher_embeddings.slurm`
 
-### Files to Create
+**Process:**
+- Loads frozen MoRE teacher weights (downloaded from Google Drive link in original MoRE README)
+- Runs teacher's ECG encoder on all available ECG records
+- Caches 128-dim projected embeddings to `data/processed/teacher_ecg_embeddings.npy`
+- Also saves study ID index to `data/processed/teacher_ecg_study_ids.npy` for lookup
 
-#### `configs/smoke_test.yaml`
-```yaml
-data_path: data/processed/smoke_test.npy
-batch_size: 4
-num_workers: 0
-epochs: 1
-learning_rate: 3e-5
-n_samples: 50  # rows from manifest to include
-```
+**Output:**
+- `data/processed/teacher_ecg_embeddings.npy`: shape `(28,745, 128)`, float32
+- `data/processed/teacher_ecg_study_ids.npy`: shape `(28,745,)`
 
-#### `scripts/build_smoke_test_data.py`
-- Takes first N rows from manifest
-- Runs through `convert_manifest_to_more_format.py` logic on just those rows
-- Outputs `data/processed/smoke_test.npy`
-
-#### `slurm/smoke_test.slurm`
-- Short walltime (30 min), 1 GPU
-- Runs smoke test forward pass check
-- Logs to `logs/slurm_smoke_{j}.out`
-
-#### `docs/smoke_test.md`
-- Step-by-step instructions to run smoke test from scratch
-- Expected outputs and what success looks like
+**Issue discovered:**
+502 out of 28,745 embeddings contained NaN values — caused by ViT encoder instability on some ECG records (likely signal quality issues). These are sanitized with `np.nan_to_num(..., nan=0.0)` at dataset load time.
 
 ---
 
-## Phase 5 — Distillation-Ready Scaffolding
+## Phase 5 — Distillation 🔄 IN PROGRESS
 
-### Purpose
-Lay the groundwork for the next development phase without implementing the full distillation loop.
+**Architecture:** MobileNetV3-Small adapted for 1-D single-lead ECG input
 
-### Files to Create
-
-#### `docs/distillation_plan.md`
-- Teacher: MoRE MultiModal (frozen, pre-trained)
-- Student: MobileNetV3-Small adapted for 1-lead ECG input
-- Loss functions:
-  - Task loss: CrossEntropy on CVD labels
-  - Soft logits: KL divergence (teacher logits vs student logits)
-  - Embedding alignment: Cosine similarity (teacher ECG embedding vs student embedding)
-  - Cross-modal similarity: Preserve teacher ECG-CXR similarity matrix
-- Training data: same manifest subset, ECG only for student
-- Evaluation: Lead ablation study (Lead I, II, V2)
-
-#### `distill/` directory
 ```
-distill/
-├── __init__.py
-├── student_model.py       # Placeholder: MobileNetV3-1D adapter
-├── distill_dataset.py     # Dataset that returns (ecg, teacher_embedding, labels)
-├── distill_train.py       # Main distillation training loop (scaffold)
-└── configs/
-    └── distill_config.yaml  # Teacher ckpt path, student config, loss weights
+Input: (B, 1, 1000)  — Lead I at 100 Hz, 10s
+  └─ Conv1D channel adapter: 1→16→3
+       └─ MobileNetV3-Small backbone (timm)
+            └─ 128-dim embedding
+                 ├─ ecg_classifier  → (B, 10)  primary head
+                 └─ pulm_classifier → (B, 4)   secondary head
 ```
 
-#### `configs/distill_config.yaml`
-```yaml
-teacher:
-  checkpoint: outputs/teacher/best_multimodel.pth
-  embedding_cache: outputs/teacher/ecg_embeddings_cache.npy
+Total student parameters: ~2.54M (vs ~280M teacher)
 
-student:
-  architecture: mobilenetv3_small
-  input_leads: [1]   # lead index for single-lead mode
-  num_classes: 4     # Atelectasis, Cardiomegaly, Edema, Pleural Effusion
+**Files implemented:**
+- `distill/student_model.py` — dual-head MobileNetV3-Small
+- `distill/distill_dataset.py` — returns `(ecg_tensor, teacher_emb, ecg_labels, pulm_labels)`
+- `distill/distill_train.py` — training loop with dual-head loss + NaN guard + gradient clipping
+- `distill/evaluate_student.py` — student vs teacher linear probe benchmark
+- `distill/cache_teacher_embeddings.py` — Phase 4 caching script
+- `configs/distill_config.yaml` — all hyperparameters
+- `slurm/distill_train.slurm` — SLURM job (GPU, 8h)
+- `slurm/evaluate_student.slurm` — SLURM evaluation job
 
-loss_weights:
-  alpha: 1.0    # task loss
-  beta: 0.5     # soft logits (KL)
-  gamma: 0.5    # embedding alignment (cosine)
-  delta: 0.3    # cross-modal similarity matching
+**Training loss:**
 ```
+L = 1.0 × L_ecg_BCE  +  0.5 × L_pulm_BCE  +  0.5 × L_align
+```
+where `L_align = 1 − mean_cosine_similarity(student_emb, teacher_emb)`
+
+**Early stopping:** on ECG head macro AUC (patience=15 epochs)
+
+**Pending ablations:**
+- [ ] Lead ablation: Lead I vs Lead II vs Lead V2
+- [ ] Loss weight ablation: vary `alpha_pulm` and `gamma`
+- [ ] Class-weighted BCE for rare ECG classes (ST elevation MI: 480 records, LBBB: 1,055)
+- [ ] EfficientNetV2 backbone comparison
 
 ---
 
@@ -242,31 +179,17 @@ loss_weights:
 Phase 0 (done)
     │
     ▼
-Phase 1: Setup dirs + configs
+Phase 1: Setup dirs + configs (done)
     │
     ▼
-Phase 2: Build download lists → submit Slurm download job
-    │             (runs in background, ~hours)
-    ▼
-Phase 3: Once download complete → verify layout → convert to .npy
+Phase 2: Download pipeline → partial ECG data (done, inode limited)
     │
     ▼
-Phase 4: Smoke test → confirm forward pass
+Phase 3: Verify layout → convert to .npy with ECG + pulm labels (done)
     │
     ▼
-Phase 5: Distillation scaffold (can begin in parallel with Phase 4)
+Phase 4: Cache teacher ECG embeddings (done, 28,745 × 128)
+    │
+    ▼
+Phase 5: Student training → evaluation → ablations (in progress)
 ```
-
----
-
-## Open Assumptions
-
-See `docs/assumptions.md` for assumptions that may need validation:
-
-1. **ECG sampling rate:** Assumed 500 Hz (5000 samples per 10s recording → downsample by 5 → 1000 samples at 100 Hz). Verify with `wfdb.rdheader()` on a downloaded record.
-2. **No CheXpert labels in manifest:** We assume labels can be joined via `subject_id` + `cxr_study_id`. If a patient's study has no CheXpert label row, we use zeros (no finding).
-3. **One CXR per subject:** The manifest has `rn=1` for all rows (first-ranked match). We use this single CXR per patient.
-4. **Radiology report availability:** Not all CXR studies have associated `.txt` report files. Where missing, we use the label-derived synthetic note (same logic as MoRE's `generate_xray_note()`).
-5. **ECG text report:** Constructed from `machine_measurements.csv` columns `report_0`–`report_6` joined by space. May be empty for some records.
-6. **Split assignment:** We follow the official MIMIC-CXR split (`mimic-cxr-2.0.0-split.csv`) keyed on `dicom_id`. If a dicom_id is missing from the split file, the sample is assigned to 'train'.
-7. **Day_diff direction:** The manifest stores absolute day difference. For same-day pairs (day_diff=0), the ECG and CXR are treated as fully aligned.
