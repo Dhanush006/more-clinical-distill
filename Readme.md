@@ -61,10 +61,95 @@ python scripts/convert_manifest_to_more_format.py
 sbatch slurm/smoke_test.slurm
 ```
 
-### 8. Distillation (Phase 5)
+### 8. Cache teacher ECG embeddings (Phase 5, prerequisite)
+```bash
+# Pre-compute 128-dim ECG embeddings from frozen MoRE teacher
+sbatch slurm/cache_teacher_embeddings.slurm
+# Outputs: data/processed/teacher_ecg_embeddings.npy  (N×128 float32)
+#          data/processed/teacher_ecg_study_ids.npy   (N,)
+```
+
+### 9. Distillation training (Phase 5)
 ```bash
 sbatch slurm/distill_train.slurm
+# Best checkpoint auto-saved to outputs/distill/student_best_ep{N}_ecgauc{X}.pth
 ```
+
+### 10. Evaluate student vs teacher probe (Phase 5)
+```bash
+# Auto-selects best checkpoint; runs on both val and test splits
+sbatch slurm/evaluate_student.slurm
+
+# Or specify a checkpoint explicitly:
+CKPT=outputs/distill/student_best_ep34_ecgauc0.7043.pth \
+  sbatch slurm/evaluate_student.slurm
+```
+
+---
+
+## Dual-Head Student Architecture
+
+The student is a MobileNetV3-Small backbone adapted for 1-D single-lead ECG input:
+
+```
+Input: (B, 1, 1000)  — Lead I at 100 Hz, 10 s
+  └─ MobileNetV3-Small backbone (modified for 1-D)
+       └─ 128-dim embedding
+            ├─ ecg_classifier  → (B, 10)  ECG rhythm logits    [primary head]
+            └─ pulm_classifier → (B, 4)   pulmonary logits     [secondary head]
+```
+
+**Training loss:**
+```
+L = 1.0 × L_ecg_BCE  +  0.5 × L_pulm_BCE  +  0.5 × L_align
+```
+where `L_align = 1 - mean_cosine_similarity(student_emb, teacher_emb)`.
+
+**ECG rhythm classes (10):** Normal, Sinus bradycardia, Sinus tachycardia, Atrial fibrillation, LBBB, RBBB, ST elevation MI, ST ischemia, AV block, LVH
+
+Labels parsed from `machine_measurements.csv` free-text report fields using regex matching.
+
+**Pulmonary classes (4):** Atelectasis, Cardiomegaly, Edema, Pleural Effusion
+Labels from CheXpert annotations, learned indirectly via embedding alignment with the multimodal teacher.
+
+---
+
+## Baseline Results (Run 1 — epoch 34 best checkpoint)
+
+Evaluated on val set. Teacher probe = `MultiOutputClassifier(LogisticRegression)` fit on teacher embeddings from train split — represents the ceiling achievable from teacher embeddings alone.
+
+### ECG Rhythm Head (primary)
+
+| Class | Student AUC | Teacher probe AUC |
+|---|---|---|
+| Normal | 0.632 | — |
+| Sinus bradycardia | 0.932 | — |
+| Sinus tachycardia | 0.784 | — |
+| Atrial fibrillation | 0.523 | — |
+| LBBB | 0.984 | — |
+| RBBB | 0.614 | — |
+| ST elevation MI | 0.614 | — |
+| ST ischemia | 0.704 | — |
+| AV block | 0.569 | — |
+| LVH | 0.567 | — |
+| **MACRO** | **0.7043** | **0.9332** |
+
+### Pulmonary Head (secondary, via distillation)
+
+| Class | Student AUC | Teacher probe AUC |
+|---|---|---|
+| Atelectasis | 0.484 | 0.6283 |
+| Cardiomegaly | 0.463 | 0.6371 |
+| Edema | 0.485 | 0.7212 |
+| Pleural Effusion | 0.463 | 0.6518 |
+| **MACRO** | **0.4735** | **0.6596** |
+
+**Embedding cosine similarity (student vs teacher): 0.5821**
+
+Notes:
+- ECG head macro AUC of 0.70 is a strong first-run result given single-lead input only.
+- Pulm head near-random (0.47) on run 1 — expected, as the student sees no CXR. Planned ablations: increase `gamma` (alignment weight), try higher-capacity backbone.
+- Teacher probe ECG AUC (0.93) reflects full multimodal context (ECG + CXR + text); the relevant ECG-only baseline comparison is TBD.
 
 ---
 
@@ -72,21 +157,35 @@ sbatch slurm/distill_train.slurm
 
 ```
 more-clinical-distill/
-├── configs/              # paths.yaml, smoke_test.yaml, distill_config.yaml
-├── data/                 # gitignored — raw downloads and processed arrays
+├── configs/
+│   ├── paths.yaml               # data paths config
+│   ├── smoke_test.yaml          # teacher smoke-test config
+│   └── distill_config.yaml      # student distillation config
+├── data/                        # gitignored — raw downloads and processed arrays
 │   ├── mimic-iv-ecg/
 │   ├── mimic-cxr-jpg/
-│   └── processed/        # MoRE-format .npy files
-├── distill/              # Student model scaffold (Phase 5)
-├── docs/                 # Audit docs and implementation plans
-├── logs/                 # Slurm logs (gitignored)
-├── manifests/            # Download lists (gitignored)
-├── outputs/              # Model checkpoints (gitignored)
-├── preprocessing/        # Original MoRE preprocessing scripts
-├── scripts/              # Project-specific helper scripts
-├── slurm/                # SLURM job scripts
-├── utils/                # Original MoRE utilities
-├── .env.example          # Credential template (copy to .env, never commit)
+│   └── processed/               # MoRE-format .npy files + teacher embedding cache
+├── distill/
+│   ├── student_model.py         # MobileNetV3-Small dual-head student
+│   ├── distill_dataset.py       # Dataset: ECG signal + teacher emb + labels
+│   ├── distill_train.py         # Training loop with dual-head loss
+│   ├── evaluate_student.py      # Benchmark: student vs teacher linear probe
+│   └── cache_teacher_embeddings.py  # Pre-compute teacher ECG embeddings
+├── docs/                        # Audit docs and implementation plans
+├── logs/                        # SLURM logs (gitignored)
+├── manifests/                   # Download lists (gitignored)
+├── outputs/                     # Model checkpoints (gitignored)
+├── preprocessing/               # Original MoRE preprocessing scripts
+├── scripts/
+│   ├── convert_manifest_to_more_format.py  # Build train/val/test .npy splits
+│   └── ...
+├── slurm/
+│   ├── distill_train.slurm
+│   ├── evaluate_student.slurm
+│   ├── cache_teacher_embeddings.slurm
+│   └── ...
+├── utils/                       # Original MoRE utilities
+├── .env.example                 # Credential template (copy to .env, never commit)
 ├── pretrain_multimodel.py
 └── requirements.txt
 ```
