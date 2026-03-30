@@ -1,23 +1,24 @@
 """
 distill/distill_train.py
 
-Distillation training loop scaffold.
+Distillation training loop — dual-head student.
 
 Teacher:  MoRE MultiModal (frozen) — multimodal ECG+CXR+Text
 Student:  MobileNetV3-Small        — single-lead ECG only
 
+Heads:
+  Primary   (ecg_classifier):  10-class ECG rhythm  (multi-label BCE)
+  Secondary (pulm_classifier):  4-class pulmonary    (multi-label BCE via distillation)
+
 Loss:
-  L = alpha * L_task
-    + beta  * L_kl        (soft logits KL divergence)
-    + gamma * L_align     (embedding cosine similarity)
-    + delta * L_xmodal    (preserve teacher ECG-CXR similarity matrix)
+  L = alpha_ecg  * L_ecg_task    (ECG rhythm BCE — primary head)
+    + alpha_pulm * L_pulm_task   (pulmonary BCE  — secondary head)
+    + gamma      * L_align       (embedding cosine similarity to teacher)
+
+Early stopping on validation macro-AUC for ECG head (primary task).
 
 Usage:
     python distill/distill_train.py --config configs/distill_config.yaml
-
-NOTE: This is a scaffold. The teacher forward pass and
-      cross-modal similarity loss (L_xmodal) are stubbed out
-      pending teacher weight availability (Phase 4 smoke test).
 """
 
 import argparse
@@ -45,21 +46,9 @@ from distill_dataset import DistillDataset
 # ── Loss functions ────────────────────────────────────────────────────
 
 def task_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """Binary cross-entropy for multi-label CheXpert classification."""
-    # Replace -1 (uncertain) with 0 for BCE
-    labels = labels.clamp(min=0.0)
-    return F.binary_cross_entropy_with_logits(logits, labels)
-
-
-def kl_soft_loss(
-    student_logits: torch.Tensor,
-    teacher_logits: torch.Tensor,
-    temperature: float = 4.0,
-) -> torch.Tensor:
-    """KL divergence between softened teacher and student distributions."""
-    p_teacher = F.softmax(teacher_logits / temperature, dim=-1)
-    log_p_student = F.log_softmax(student_logits / temperature, dim=-1)
-    return F.kl_div(log_p_student, p_teacher, reduction="batchmean") * (temperature ** 2)
+    """Binary cross-entropy for multi-label classification.
+    Uncertain labels (-1) are replaced with 0 for BCE."""
+    return F.binary_cross_entropy_with_logits(logits, labels.clamp(min=0.0))
 
 
 def embedding_align_loss(
@@ -78,22 +67,25 @@ def train_one_epoch(
 ):
     student.train()
     total_loss = 0.0
-    alpha = cfg["loss_weights"]["alpha"]
-    gamma = cfg["loss_weights"]["gamma"]
+    alpha_ecg  = cfg["loss_weights"]["alpha_ecg"]
+    alpha_pulm = cfg["loss_weights"]["alpha_pulm"]
+    gamma      = cfg["loss_weights"]["gamma"]
 
     bar = tqdm(loader, desc=f"Distill Epoch {epoch+1}/{total_epochs}")
-    for ecg, teacher_emb, labels in bar:
+    for ecg, teacher_emb, ecg_labels, pulm_labels in bar:
         ecg         = ecg.to(device)
         teacher_emb = teacher_emb.to(device)
-        labels      = labels.to(device)
+        ecg_labels  = ecg_labels.to(device)
+        pulm_labels = pulm_labels.to(device)
 
         with autocast():
-            logits, student_emb = student(ecg)
-            l_task  = task_loss(logits, labels)
-            l_align = embedding_align_loss(student_emb, teacher_emb)
-            # L_kl and L_xmodal require teacher logits / CXR embeddings;
-            # stubbed as zero until teacher inference is wired up
-            loss = alpha * l_task + gamma * l_align
+            ecg_logits, pulm_logits, student_emb = student(ecg)
+            l_ecg_task  = task_loss(ecg_logits, ecg_labels)
+            l_pulm_task = task_loss(pulm_logits, pulm_labels)
+            l_align     = embedding_align_loss(student_emb, teacher_emb)
+            loss = (alpha_ecg  * l_ecg_task
+                  + alpha_pulm * l_pulm_task
+                  + gamma      * l_align)
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -101,36 +93,64 @@ def train_one_epoch(
         optimizer.zero_grad()
 
         total_loss += loss.item()
-        bar.set_postfix({"loss": f"{loss.item():.4f}",
-                         "l_task": f"{l_task.item():.4f}",
-                         "l_align": f"{l_align.item():.4f}"})
+        bar.set_postfix({
+            "loss":      f"{loss.item():.4f}",
+            "ecg_task":  f"{l_ecg_task.item():.4f}",
+            "pulm_task": f"{l_pulm_task.item():.4f}",
+            "align":     f"{l_align.item():.4f}",
+        })
 
     return total_loss / len(loader)
 
 
-def validate(student, loader, device):
-    student.eval()
-    all_logits, all_labels = [], []
-    with torch.no_grad():
-        for ecg, teacher_emb, labels in loader:
-            ecg    = ecg.to(device)
-            labels = labels.to(device)
-            logits, _ = student(ecg)
-            all_logits.append(logits.cpu())
-            all_labels.append(labels.cpu())
-    all_logits = torch.cat(all_logits)
-    all_labels = torch.cat(all_labels).clamp(min=0.0)
-    val_loss = F.binary_cross_entropy_with_logits(all_logits, all_labels).item()
-
-    # AUC-ROC per class (more informative than BCE given class imbalance)
-    probs = torch.sigmoid(all_logits).numpy()
-    labs  = all_labels.numpy()
+def compute_auc(logits_list, labels_list, label_name: str) -> tuple[float, np.ndarray]:
+    """Compute per-class and macro AUC-ROC. Returns (macro_auc, per_class_auc)."""
+    from sklearn.metrics import roc_auc_score
+    probs = torch.sigmoid(torch.cat(logits_list)).numpy()
+    labs  = torch.cat(labels_list).clamp(min=0.0).numpy()
     try:
-        from sklearn.metrics import roc_auc_score
-        auc = roc_auc_score(labs, probs, average="macro")
-    except Exception:
-        auc = float("nan")
-    return val_loss, auc
+        per_class = roc_auc_score(labs, probs, average=None)
+        macro     = float(np.mean(per_class))
+    except Exception as e:
+        print(f"  [{label_name}] AUC error: {e}")
+        n = probs.shape[1]
+        per_class = np.full(n, float("nan"))
+        macro = float("nan")
+    return macro, per_class
+
+
+def validate(student, loader, device, ecg_class_names, pulm_class_names):
+    student.eval()
+    ecg_logits_all, ecg_labels_all   = [], []
+    pulm_logits_all, pulm_labels_all = [], []
+
+    with torch.no_grad():
+        for ecg, _teacher_emb, ecg_labels, pulm_labels in loader:
+            ecg         = ecg.to(device)
+            ecg_labels  = ecg_labels.to(device)
+            pulm_labels = pulm_labels.to(device)
+            ecg_logits, pulm_logits, _ = student(ecg)
+            ecg_logits_all.append(ecg_logits.cpu())
+            ecg_labels_all.append(ecg_labels.cpu())
+            pulm_logits_all.append(pulm_logits.cpu())
+            pulm_labels_all.append(pulm_labels.cpu())
+
+    ecg_macro,  ecg_per  = compute_auc(ecg_logits_all,  ecg_labels_all,  "ECG")
+    pulm_macro, pulm_per = compute_auc(pulm_logits_all, pulm_labels_all, "Pulm")
+
+    ecg_bce  = F.binary_cross_entropy_with_logits(
+        torch.cat(ecg_logits_all), torch.cat(ecg_labels_all).clamp(min=0.0)).item()
+    pulm_bce = F.binary_cross_entropy_with_logits(
+        torch.cat(pulm_logits_all), torch.cat(pulm_labels_all).clamp(min=0.0)).item()
+
+    return {
+        "ecg_bce":   ecg_bce,
+        "ecg_auc":   ecg_macro,
+        "ecg_per":   ecg_per,
+        "pulm_bce":  pulm_bce,
+        "pulm_auc":  pulm_macro,
+        "pulm_per":  pulm_per,
+    }
 
 
 # ── Main ──────────────────────────────────────────────────────────────
@@ -142,12 +162,21 @@ def parse_args():
 
 
 def main():
-    args  = parse_args()
+    args = parse_args()
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
+
+    # Class name lists for readable per-class AUC printing
+    ecg_class_names  = cfg["student"].get("ecg_class_names", [
+        "Normal", "Sinus brady", "Sinus tachy", "AFib",
+        "LBBB", "RBBB", "ST elev MI", "ST ischemia", "AV block", "LVH"
+    ])
+    pulm_class_names = cfg["student"].get("pulm_class_names", [
+        "Atelectasis", "Cardiomegaly", "Edema", "Pleural Effusion"
+    ])
 
     # ── Datasets ──────────────────────────────────────────────────────
     train_ds = DistillDataset(
@@ -200,37 +229,53 @@ def main():
     out_dir = Path(cfg["outputs"]["checkpoint_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    best_val_auc   = 0.0
-    patience       = cfg["training"].get("early_stopping_patience", 15)
-    no_improve     = 0
-    epochs         = cfg["training"]["epochs"]
+    best_ecg_auc  = 0.0
+    patience      = cfg["training"].get("early_stopping_patience", 15)
+    no_improve    = 0
+    epochs        = cfg["training"]["epochs"]
 
     for epoch in range(epochs):
         t0 = time.time()
         train_loss = train_one_epoch(
             student, train_loader, optimizer, scaler, device, cfg, epoch, epochs
         )
-        val_loss, val_auc = validate(student, val_loader, device)
+        metrics = validate(student, val_loader, device, ecg_class_names, pulm_class_names)
         scheduler.step()
 
         elapsed = (time.time() - t0) / 60
         print(f"\nEpoch {epoch+1}/{epochs} | "
-              f"train={train_loss:.4f}  val_bce={val_loss:.4f}  "
-              f"val_auc={val_auc:.4f}  "
-              f"lr={optimizer.param_groups[0]['lr']:.2e}  "
-              f"time={elapsed:.1f}min")
+              f"train={train_loss:.4f}  "
+              f"ecg_bce={metrics['ecg_bce']:.4f}  ecg_auc={metrics['ecg_auc']:.4f}  "
+              f"pulm_bce={metrics['pulm_bce']:.4f}  pulm_auc={metrics['pulm_auc']:.4f}  "
+              f"lr={optimizer.param_groups[0]['lr']:.2e}  time={elapsed:.1f}min")
 
-        if val_auc > best_val_auc:
-            best_val_auc = val_auc
+        # Per-class AUC
+        ecg_per_str  = "  ".join(f"{n}={v:.3f}" for n, v in
+                                  zip(ecg_class_names, metrics["ecg_per"]))
+        pulm_per_str = "  ".join(f"{n}={v:.3f}" for n, v in
+                                  zip(pulm_class_names, metrics["pulm_per"]))
+        print(f"  ECG  per-class: {ecg_per_str}")
+        print(f"  Pulm per-class: {pulm_per_str}")
+
+        # Early stopping on primary (ECG) AUC
+        if metrics["ecg_auc"] > best_ecg_auc:
+            best_ecg_auc = metrics["ecg_auc"]
             no_improve   = 0
-            ckpt = out_dir / f"student_best_ep{epoch+1}_auc{val_auc:.4f}.pth"
-            torch.save(student.state_dict(), ckpt)
-            print(f"  Saved best checkpoint: {ckpt}")
+            ckpt = out_dir / f"student_best_ep{epoch+1}_ecgauc{metrics['ecg_auc']:.4f}.pth"
+            torch.save({
+                "epoch":       epoch + 1,
+                "state_dict":  student.state_dict(),
+                "ecg_auc":     metrics["ecg_auc"],
+                "pulm_auc":    metrics["pulm_auc"],
+                "ecg_per":     metrics["ecg_per"].tolist(),
+                "pulm_per":    metrics["pulm_per"].tolist(),
+            }, ckpt)
+            print(f"  Saved best checkpoint: {ckpt.name}")
         else:
             no_improve += 1
             if no_improve >= patience:
                 print(f"  Early stopping at epoch {epoch+1} "
-                      f"(no AUC improvement for {patience} epochs)")
+                      f"(no ECG AUC improvement for {patience} epochs)")
                 break
 
         if epoch % 10 == 0:

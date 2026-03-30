@@ -5,15 +5,20 @@ scripts/convert_manifest_to_more_format.py
 Converts matched_patients_v1.csv + MIMIC metadata into the .npy format
 expected by MoRE's MultiModalData dataset class.
 
-MoRE item format (list of 6 elements per row):
+MoRE item format (list of 7 elements per row):
   [0] xray_path    str  — absolute path to .jpg
   [1] ecg_stem     str  — absolute path stem (no extension) for wfdb.rdsamp()
   [2] xray_note    str  — radiology report (FINDINGS + IMPRESSION)
   [3] ecg_note     str  — ECG machine report / measurement text
-  [4] labels       np.ndarray shape (4,) — CheXpert subset:
+  [4] ecg_labels   np.ndarray shape (10,) — ECG rhythm classes (multi-label):
+                          [Normal, Sinus bradycardia, Sinus tachycardia,
+                           Atrial fibrillation, LBBB, RBBB,
+                           ST elevation MI, ST ischemia, AV block, LVH]
+                          values: 1.0 (present), 0.0 (absent)
+  [5] pulm_labels  np.ndarray shape (4,) — CheXpert pulmonary subset:
                           [Atelectasis, Cardiomegaly, Edema, Pleural Effusion]
                           values: 1.0 (present), 0.0 (absent), -1.0 (uncertain)
-  [5] split        str  — 'train', 'validate', or 'test'
+  [6] split        str  — 'train', 'validate', or 'test'
 
 Outputs:
   data/processed/more_train.npy
@@ -45,6 +50,49 @@ import yaml
 
 # CheXpert label columns we use (indices match MoRE paper: 0,1,3,9)
 CHEXPERT_COLS = ["Atelectasis", "Cardiomegaly", "Edema", "Pleural Effusion"]
+
+# ── ECG rhythm class definitions (multi-label, from machine_measurements) ────
+# Each entry: (class_name, compiled_regex)
+# Keyword matching is case-insensitive on the concatenated report string.
+# "Normal ECG" uses a negative lookbehind so "Abnormal ECG" is not matched.
+ECG_RHYTHM_CLASSES = [
+    "Normal",
+    "Sinus bradycardia",
+    "Sinus tachycardia",
+    "Atrial fibrillation",
+    "LBBB",
+    "RBBB",
+    "ST elevation MI",
+    "ST ischemia",
+    "AV block",
+    "LVH",
+]
+
+_ECG_PATTERNS = [
+    re.compile(r'(?<![a-z])normal ecg\b', re.I),                          # Normal ECG (not Abnormal ECG)
+    re.compile(r'\bsinus bradycardia\b', re.I),                           # Sinus bradycardia
+    re.compile(r'\bsinus tachycardia\b', re.I),                           # Sinus tachycardia
+    re.compile(r'\batrial fibrillation\b', re.I),                         # Atrial fibrillation
+    re.compile(r'\bleft bundle branch block\b', re.I),                    # LBBB
+    re.compile(r'\bright bundle branch block\b|\brbbb\b', re.I),          # RBBB
+    re.compile(r'\bacute st elevation\b|\bst elevation mi\b', re.I),      # ST elevation MI
+    re.compile(r'\bmyocardial ischemia\b', re.I),                         # ST ischemia
+    re.compile(r'\ba-v block\b|\bav block\b|\bdegree a-v\b', re.I),       # AV block
+    re.compile(r'\bleft ventricular hypertrophy\b|\blvh\b', re.I),        # LVH
+]
+
+
+def parse_ecg_rhythm_labels(report_text: str) -> np.ndarray:
+    """
+    Parse ECG machine report text into a 10-dim multi-label binary vector.
+    Args:
+        report_text: concatenated report_0..report_N strings (space-joined)
+    Returns:
+        np.ndarray shape (10,) with 0.0 / 1.0 values
+    """
+    text = report_text.lower()
+    return np.array([1.0 if pat.search(text) else 0.0 for pat in _ECG_PATTERNS],
+                    dtype=np.float32)
 
 
 def load_config(path: str) -> dict:
@@ -207,6 +255,9 @@ def convert(cfg: dict, subset: int | None) -> None:
         raw_ecg = ecg_note_map.get(ecg_study_id, "")
         ecg_note = "The report from ECG is: " + (clean_text(raw_ecg) if raw_ecg else "ECG note not available.")
 
+        # ECG rhythm labels (multi-label, 10 classes)
+        ecg_labels = parse_ecg_rhythm_labels(raw_ecg)
+
         # Split
         if split_df is not None:
             split_val = split_map.get(cxr_study_id, "train")
@@ -218,12 +269,13 @@ def convert(cfg: dict, subset: int | None) -> None:
         else:
             split_val = "train"
 
-        items.append([xray_path, ecg_stem, xray_note, ecg_note, row_labels, split_val])
+        # item[4]=ecg_labels(10,)  item[5]=pulm_labels(4,)  item[6]=split
+        items.append([xray_path, ecg_stem, xray_note, ecg_note, ecg_labels, row_labels, split_val])
 
     # ── Split and save ────────────────────────────────────────────────
-    train_items    = [it for it in items if it[5] == "train"]
-    val_items      = [it for it in items if it[5] == "validate"]
-    test_items     = [it for it in items if it[5] == "test"]
+    train_items    = [it for it in items if it[6] == "train"]
+    val_items      = [it for it in items if it[6] == "validate"]
+    test_items     = [it for it in items if it[6] == "test"]
 
     for out_path, data in [
         (cfg["more_npy_train"], train_items),

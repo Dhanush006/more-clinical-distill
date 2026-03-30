@@ -6,7 +6,8 @@ Dataset for the distillation phase.
 Returns per item:
   ecg_tensor:        (1, 1000) float32  — single lead (default Lead I, index 0)
   teacher_embedding: (128,)   float32  — pre-cached teacher ECG embedding
-  labels:            (4,)     float32  — CheXpert subset labels
+  ecg_labels:        (10,)    float32  — ECG rhythm classes (multi-label)
+  pulm_labels:       (4,)     float32  — CheXpert pulmonary labels
 
 Teacher embeddings are pre-computed by distill/cache_teacher_embeddings.py.
 Alignment is done via study-ID lookup (not index-to-index), so the .npy
@@ -89,9 +90,10 @@ class DistillDataset(Dataset):
         return len(self.valid_indices)
 
     def __getitem__(self, idx):
-        item     = self.data[self.valid_indices[idx]]
-        ecg_stem = item[1]
-        labels   = item[4].astype(np.float32)
+        item      = self.data[self.valid_indices[idx]]
+        ecg_stem  = item[1]
+        ecg_labels  = item[4].astype(np.float32)   # (10,) ECG rhythm labels
+        pulm_labels = item[5].astype(np.float32)   # (4,)  CheXpert pulmonary
 
         # ── Load ECG via wfdb ─────────────────────────────────────────
         import wfdb
@@ -133,4 +135,7 @@ class DistillDataset(Dataset):
         else:
             teacher_emb = torch.zeros(128)
 
-        return ecg_tensor, teacher_emb, torch.FloatTensor(labels)
+        return (ecg_tensor,
+                teacher_emb,
+                torch.FloatTensor(ecg_labels),
+                torch.FloatTensor(pulm_labels))

@@ -16,11 +16,28 @@ teacher:
 # ── Student ───────────────────────────────────────────────────
 student:
   architecture:        mobilenetv3_small_100
-  num_classes:         4          # Atelectasis, Cardiomegaly, Edema, Pleural Effusion
+  ecg_num_classes:     10         # ECG rhythm classes (primary head)
+  pulm_num_classes:    4          # Pulmonary pathology classes (secondary head)
   embedding_dim:       128        # must match teacher ECG projector output dim
   signal_length:       1000       # samples at 100 Hz (after 500→100 Hz downsample)
   input_lead:          0          # 0=Lead I, 1=Lead II, 7=V2 (0-indexed)
   pretrained_backbone: false      # set true to use ImageNet-pretrained MobileNetV3
+  ecg_class_names:
+    - Normal
+    - Sinus bradycardia
+    - Sinus tachycardia
+    - Atrial fibrillation
+    - LBBB
+    - RBBB
+    - ST elevation MI
+    - ST ischemia
+    - AV block
+    - LVH
+  pulm_class_names:
+    - Atelectasis
+    - Cardiomegaly
+    - Edema
+    - Pleural Effusion
 
 # ── Data ─────────────────────────────────────────────────────
 data:
@@ -29,12 +46,11 @@ data:
   test_npy:  data/processed/more_test.npy
 
 # ── Loss weights ─────────────────────────────────────────────
-# L = alpha*L_task + beta*L_kl + gamma*L_align + delta*L_xmodal
+# L = alpha_ecg*L_ecg_task + alpha_pulm*L_pulm_task + gamma*L_align
 loss_weights:
-  alpha: 1.0     # task loss (BCE on CVD labels)
-  beta:  0.5     # soft logits KL divergence (teacher → student)
-  gamma: 0.5     # embedding alignment (cosine similarity)
-  delta: 0.3     # cross-modal similarity matching (ECG-CXR teacher sim)
+  alpha_ecg:  1.0   # ECG rhythm BCE (primary head)
+  alpha_pulm: 0.5   # pulmonary BCE  (secondary head, learned via distillation)
+  gamma:      0.5   # embedding cosine alignment to teacher
 
 # ── Training ─────────────────────────────────────────────────
 training:
