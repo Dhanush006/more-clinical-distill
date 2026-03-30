@@ -56,7 +56,13 @@ class DistillDataset(Dataset):
         self.emb_lookup: dict[str, int] = {}
 
         if embed_cache is not None:
-            self.embeddings = np.load(embed_cache, allow_pickle=True).astype(np.float32)
+            raw = np.load(embed_cache, allow_pickle=True).astype(np.float32)
+            # Replace NaN/Inf in teacher embeddings (some ViT outputs are NaN for bad records)
+            n_nan_rows = int(np.isnan(raw).any(axis=1).sum())
+            if n_nan_rows:
+                print(f"[DistillDataset] WARNING: {n_nan_rows} teacher embeddings contain NaN "
+                      f"— replacing with zeros.")
+            self.embeddings = np.nan_to_num(raw, nan=0.0, posinf=0.0, neginf=0.0)
             # Derive study_id_cache path from embed_cache path if not given
             if study_id_cache is None:
                 study_id_cache = str(Path(embed_cache).parent / "teacher_ecg_study_ids.npy")

@@ -87,7 +87,14 @@ def train_one_epoch(
                   + alpha_pulm * l_pulm_task
                   + gamma      * l_align)
 
+        # Skip batch if loss is NaN (e.g., from all-zero teacher emb in batch)
+        if not torch.isfinite(loss):
+            optimizer.zero_grad()
+            continue
+
         scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad()
