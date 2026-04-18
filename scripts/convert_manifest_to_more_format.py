@@ -235,6 +235,22 @@ def convert(cfg: dict, subset: int | None) -> None:
                 ecg_note_map = dict(zip(meas_df["study_id"].astype(str),
                                         meas_df["ecg_note_raw"]))
 
+    # ── Pre-build existence sets for O(1) lookup (avoids per-row stat calls) ──
+    print("Building file existence sets...")
+    ecg_stems_on_disk: set[str] = set()
+    if use_flat_ecg:
+        ecg_stems_on_disk = {p.stem for p in ecg_files_root.glob("*.hea")}
+    else:
+        ecg_stems_on_disk = {p.stem for p in ecg_files_root.rglob("*.hea")}
+    print(f"  ECG stems found: {len(ecg_stems_on_disk):,}")
+
+    cxr_names_on_disk: set[str] = set()
+    if use_flat_cxr:
+        cxr_names_on_disk = {p.name for p in cxr_files_root.glob("*.jpg")}
+    else:
+        cxr_names_on_disk = {p.name for p in cxr_files_root.rglob("*.jpg")}
+    print(f"  CXR files found: {len(cxr_names_on_disk):,}")
+
     # ── Build items ───────────────────────────────────────────────────
     items = []
     n_missing_cxr = 0
@@ -262,11 +278,13 @@ def convert(cfg: dict, subset: int | None) -> None:
         else:
             xray_path = str(cxr_files_root / cxr_jpg_rel)
 
-        # Track missing files
-        if not Path(xray_path).exists():
-            n_missing_cxr += 1
-        if not Path(ecg_stem + ".hea").exists():
+        # Track missing files (O(1) set lookup instead of per-row stat)
+        ecg_stem_name = Path(ecg_stem).name
+        cxr_file_name = Path(xray_path).name
+        if ecg_stem_name not in ecg_stems_on_disk:
             n_missing_ecg += 1
+        if cxr_file_name not in cxr_names_on_disk:
+            n_missing_cxr += 1
 
         # Labels
         if chexpert_df is not None and cxr_study_id in chexpert_df.index:
