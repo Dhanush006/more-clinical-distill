@@ -145,16 +145,21 @@ def main():
     print("Teacher loaded and frozen.")
 
     # ── Locate ECG .hea files ─────────────────────────────────────────
-    ecg_root = Path(cfg.get("paths", {}).get("mimic_ecg_root",
-                    "data/mimic-iv-ecg"))
-    hea_files = sorted(ecg_root.rglob("*.hea"))
-    if not hea_files:
-        # Try absolute path from paths.yaml
-        import yaml as _yaml
-        with open("configs/paths.yaml") as fp:
-            paths = _yaml.safe_load(fp)
-        ecg_root = Path(paths.get("mimic_ecg_root", "data/mimic-iv-ecg"))
+    # Load paths config
+    import yaml as _yaml
+    with open("configs/paths.yaml") as fp:
+        paths_cfg = _yaml.safe_load(fp)
+
+    # Prefer flat dir (post flatten_data.py) — uses glob instead of rglob
+    ecg_flat = Path(paths_cfg.get("ecg_flat_root", "data/ecg_flat"))
+    ecg_root = Path(paths_cfg.get("mimic_ecg_root", "data/mimic-iv-ecg"))
+
+    if ecg_flat.exists() and any(ecg_flat.glob("*.hea")):
+        hea_files = sorted(ecg_flat.glob("*.hea"))
+        print(f"Using flat ECG dir: {ecg_flat}")
+    else:
         hea_files = sorted(ecg_root.rglob("*.hea"))
+        print(f"Using deep ECG dir: {ecg_root}")
 
     if not hea_files:
         print(f"No .hea files found under {ecg_root}. Run ECG download first.")

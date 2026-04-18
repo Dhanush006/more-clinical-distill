@@ -12,6 +12,12 @@ data_root: /scratch/user/dshekar/more-clinical-distill/data
 mimic_ecg_root: /scratch/user/dshekar/more-clinical-distill/data/mimic-iv-ecg
 mimic_cxr_root: /scratch/user/dshekar/more-clinical-distill/data/mimic-cxr-jpg
 
+# ── Flattened data directories (post flatten_data.py migration) ──
+# All .hea/.dat files live directly here: ecg_flat/{study_id}.hea|.dat
+# All .jpg files live directly here:       cxr_flat/{dicom_id}.jpg
+ecg_flat_root: /scratch/user/dshekar/more-clinical-distill/data/ecg_flat
+cxr_flat_root: /scratch/user/dshekar/more-clinical-distill/data/cxr_flat
+
 # ── Processed / intermediate outputs ────────────────────────
 processed_root: /scratch/user/dshekar/more-clinical-distill/data/processed
 
@@ -22,6 +28,11 @@ more_npy_test:  /scratch/user/dshekar/more-clinical-distill/data/processed/more_
 
 # ── Manifest files ───────────────────────────────────────────
 manifest_v1: /scratch/user/dshekar/matched_patients_v1.csv
+
+# Combined ECG + CXR report text (49,076 rows, joined on subject_id/ecg_study_id/cxr_study_id)
+# Columns: subject_id, ecg_study_id, cxr_study_id, ecg_reports, cxr_reports
+# 0 missing ECG reports; 2,680 missing CXR reports (label fallback used for those)
+combined_reports: /scratch/user/dshekar/more-clinical-distill/data/combined_reports.csv
 
 # Derived download lists (produced by build_download_lists.py)
 manifests_dir: /scratch/user/dshekar/more-clinical-distill/manifests

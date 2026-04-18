@@ -147,10 +147,29 @@ def convert(cfg: dict, subset: int | None) -> None:
     processed_root = Path(cfg["processed_root"])
     processed_root.mkdir(parents=True, exist_ok=True)
 
-    # Physionet wget mirrors URL structure under dest root
-    ecg_files_root = ecg_root / "physionet.org" / "files" / "mimic-iv-ecg" / "1.0"
-    cxr_files_root = cxr_root / "physionet.org" / "files" / "mimic-cxr-jpg" / "2.0.0"
-    cxr_reports_root = cxr_files_root / "files"  # radiology .txt files
+    # Use flat data directories if available (post flatten_data.py migration),
+    # otherwise fall back to the original deep wget mirror structure.
+    ecg_flat = Path(cfg.get("ecg_flat_root", ""))
+    cxr_flat = Path(cfg.get("cxr_flat_root", ""))
+    use_flat_ecg = ecg_flat.exists() and any(ecg_flat.glob("*.hea"))
+    use_flat_cxr = cxr_flat.exists() and any(cxr_flat.glob("*.jpg"))
+
+    if use_flat_ecg:
+        ecg_files_root = ecg_flat
+        print(f"  ECG: using flat dir {ecg_flat}")
+    else:
+        ecg_files_root = ecg_root / "physionet.org" / "files" / "mimic-iv-ecg" / "1.0"
+        print(f"  ECG: using deep dir {ecg_files_root}")
+
+    if use_flat_cxr:
+        cxr_files_root = cxr_flat
+        print(f"  CXR: using flat dir {cxr_flat}")
+    else:
+        cxr_files_root = cxr_root / "physionet.org" / "files" / "mimic-cxr-jpg" / "2.0.0"
+        print(f"  CXR: using deep dir {cxr_files_root}")
+
+    # Radiology .txt reports remain in original CXR dir tree (not flattened)
+    cxr_reports_root = (cxr_root / "physionet.org" / "files" / "mimic-cxr-jpg" / "2.0.0" / "files")
 
     print("Loading manifest...")
     df = pd.read_csv(manifest_path)
@@ -182,24 +201,39 @@ def convert(cfg: dict, subset: int | None) -> None:
         chexpert_df["study_id"] = chexpert_df["study_id"].astype(str)
         chexpert_df = chexpert_df.set_index("study_id")
 
-    # ── Load ECG machine measurements (for ecg_note) ─────────────────
-    ecg_meas_csv = Path(cfg["mimic_ecg_machine_reports"])
-    if not ecg_meas_csv.exists():
-        print(f"WARNING: ECG machine measurements not found: {ecg_meas_csv}")
-        ecg_note_map = {}
+    # ── Load combined reports CSV (ecg_reports + cxr_reports) ───────────
+    # Preferred source: combined_reports.csv (pre-joined, real clinical text)
+    # Columns: subject_id, ecg_study_id, cxr_study_id, ecg_reports, cxr_reports
+    combined_reports_csv = Path(cfg.get("combined_reports", ""))
+    ecg_note_map: dict[str, str] = {}   # ecg_study_id (str) → report text
+    cxr_note_map: dict[str, str] = {}   # cxr_study_id (str) → report text
+
+    if combined_reports_csv.exists():
+        rep_df = pd.read_csv(combined_reports_csv)
+        ecg_note_map = dict(zip(
+            rep_df["ecg_study_id"].astype(str),
+            rep_df["ecg_reports"].fillna("")
+        ))
+        cxr_note_map = dict(zip(
+            rep_df["cxr_study_id"].astype(str),
+            rep_df["cxr_reports"].fillna("")
+        ))
+        n_ecg_ok  = sum(1 for v in ecg_note_map.values() if v.strip())
+        n_cxr_ok  = sum(1 for v in cxr_note_map.values() if v.strip())
+        print(f"  Loaded combined_reports.csv: {n_ecg_ok:,} ECG / {n_cxr_ok:,} CXR reports")
     else:
-        meas_df = pd.read_csv(ecg_meas_csv, low_memory=False)
-        # Expect column 'study_id' and text cols; adapt as needed
-        if "study_id" in meas_df.columns and "report_0" in meas_df.columns:
-            # Concatenate report_0..report_7 columns that exist
-            report_cols = [c for c in meas_df.columns if c.startswith("report_")]
-            meas_df["ecg_note_raw"] = meas_df[report_cols].fillna("").agg(
-                lambda r: " ".join(v for v in r if v), axis=1
-            )
-            ecg_note_map = dict(zip(meas_df["study_id"].astype(str),
-                                    meas_df["ecg_note_raw"]))
-        else:
-            ecg_note_map = {}
+        # Fallback: parse machine_measurements.csv the old way
+        print("WARNING: combined_reports.csv not found — falling back to machine_measurements.csv")
+        ecg_meas_csv = Path(cfg.get("mimic_ecg_machine_reports", ""))
+        if ecg_meas_csv.exists():
+            meas_df = pd.read_csv(ecg_meas_csv, low_memory=False)
+            if "study_id" in meas_df.columns and "report_0" in meas_df.columns:
+                report_cols = [c for c in meas_df.columns if c.startswith("report_")]
+                meas_df["ecg_note_raw"] = meas_df[report_cols].fillna("").agg(
+                    lambda r: " ".join(v for v in r if v), axis=1
+                )
+                ecg_note_map = dict(zip(meas_df["study_id"].astype(str),
+                                        meas_df["ecg_note_raw"]))
 
     # ── Build items ───────────────────────────────────────────────────
     items = []
@@ -213,9 +247,20 @@ def convert(cfg: dict, subset: int | None) -> None:
         cxr_study_id = str(int(row["cxr_study_id"])) if not pd.isna(row["cxr_study_id"]) else ""
         ecg_study_id = str(int(row["ecg_study_id"])) if not pd.isna(row["ecg_study_id"]) else ""
 
-        # Absolute paths
-        xray_path = str(cxr_files_root / cxr_jpg_rel)
-        ecg_stem  = str(ecg_files_root / ecg_stem_rel)
+        # Absolute paths — flat or deep depending on what's available
+        if use_flat_ecg:
+            # Flat: stem is just the study_id filename (last component, no extension)
+            ecg_stem_name = Path(ecg_stem_rel).name  # e.g. "43658161"
+            ecg_stem = str(ecg_files_root / ecg_stem_name)
+        else:
+            ecg_stem = str(ecg_files_root / ecg_stem_rel)
+
+        if use_flat_cxr:
+            # Flat: filename is the dicom_id.jpg (last component of cxr_path)
+            cxr_jpg_name = Path(cxr_jpg_rel).name  # e.g. "1633ff06-....jpg"
+            xray_path = str(cxr_files_root / cxr_jpg_name)
+        else:
+            xray_path = str(cxr_files_root / cxr_jpg_rel)
 
         # Track missing files
         if not Path(xray_path).exists():
@@ -231,28 +276,29 @@ def convert(cfg: dict, subset: int | None) -> None:
         else:
             row_labels = np.zeros(4, dtype=float)
 
-        # Xray note: look for {p_dir}/{s_dir}/*.txt
-        # CXR path format: files/p19/p19128402/s53334082/abc.jpg
-        parts = cxr_jpg_rel.split("/")
-        if len(parts) >= 4:
-            # parts: ['files', 'p19', 'p19128402', 's53334082', 'abc.jpg']
-            p2_dir = parts[2]  # e.g. p19128402
-            s_dir  = parts[3]  # e.g. s53334082
-            txt_dir = cxr_reports_root / p2_dir / s_dir
-            txt_files = list(txt_dir.glob("*.txt")) if txt_dir.exists() else []
-            if txt_files:
-                xray_note = extract_radiology_note(txt_files[0])
+        # Xray note: prefer combined_reports.csv, fallback to .txt file, then label-derived
+        raw_cxr = cxr_note_map.get(cxr_study_id, "").strip() if cxr_note_map else ""
+        if raw_cxr:
+            xray_note = clean_text(raw_cxr)
+        else:
+            # Try .txt radiology report files
+            parts = cxr_jpg_rel.split("/")
+            if len(parts) >= 4:
+                p2_dir = parts[2]
+                s_dir  = parts[3]
+                txt_dir = cxr_reports_root / p2_dir / s_dir
+                txt_files = list(txt_dir.glob("*.txt")) if txt_dir.exists() else []
+                xray_note = extract_radiology_note(txt_files[0]) if txt_files else ""
             else:
+                xray_note = ""
+            if not xray_note:
                 xray_note = label_fallback(row_labels)
                 n_missing_note += 1
-        else:
-            xray_note = label_fallback(row_labels)
-            n_missing_note += 1
 
         xray_note = "The report from Xray is: " + xray_note
 
-        # ECG note
-        raw_ecg = ecg_note_map.get(ecg_study_id, "")
+        # ECG note: prefer combined_reports.csv, fallback to machine_measurements
+        raw_ecg = ecg_note_map.get(ecg_study_id, "").strip()
         ecg_note = "The report from ECG is: " + (clean_text(raw_ecg) if raw_ecg else "ECG note not available.")
 
         # ECG rhythm labels (multi-label, 10 classes)
