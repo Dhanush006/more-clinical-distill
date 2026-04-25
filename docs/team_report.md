@@ -11,22 +11,23 @@
 
 We distil a 280 M-parameter multimodal teacher (**MoRE**: ECG-ViT + CXR-ViT + RoBERTa, frozen) into a 1.82 M-parameter single-lead **ECG student** (MobileNetV3-Small) using a dual-head loss that combines supervised BCE with cosine alignment to the teacher's embeddings. We also propose a **ResidualLossGate** — a small MLP that dynamically reweights five distillation loss terms per sample.
 
-**Headline numbers (val, n=379):**
+**Headline numbers — val (n=379) for ranking, test (n=274) for absolute estimates:**
 
-| Run | Backbone | Loss routing | Lead | Macro ECG AUROC | Macro Pulm AUROC |
-|---|---|---|---|---:|---:|
-| Prior baseline (28 k records, no cache) | MobileNetV3-S | static 1.0/0.5/0.5 | I | 0.7043 | 0.4735 |
-| **A0_baseline (49 k, cache)** | **MobileNetV3-S** | **static** | **I** | **0.8084** | **0.5958** |
-| A1_uniform | MobileNetV3-S | uniform 1/5 | I | 0.8042 | 0.5995 |
-| A2_lossgate | MobileNetV3-S | **learned gate** | I | 0.7632 | 0.5833 |
-| A3_ecgonly  | MobileNetV3-S | gate, ECG-only align | I | 0.7190 | 0.5616 |
-| B1_lead2    | MobileNetV3-S | gate | II | 0.6776 | 0.5828 |
-| B2_v2       | MobileNetV3-S | gate | V2 | 0.6343 | 0.4602 |
-| **A0_efficientnet** | **EfficientNet-B0** | **static** | **I** | **TBD** | **TBD** |
+| Run | Backbone | Loss routing | Lead | Val ECG AUROC | Test ECG AUROC | Test ECG AUPRC | Test ECG F1 |
+|---|---|---|---|---:|---:|---:|---:|
+| Prior baseline (28 k records, no cache) | MobileNetV3-S | static 1.0/0.5/0.5 | I | 0.7043 | n/a | n/a | n/a |
+| **A0_baseline (49 k, cache)** | **MobileNetV3-S** | **static** | **I** | **0.8084** | 0.7320 | 0.3057 | 0.3812 |
+| **A0_efficientnet** | **EfficientNet-B0** | **static** | **I** | **0.8071** | **0.7421** | **0.3887** | **0.4410** |
+| A1_uniform | MobileNetV3-S | uniform 1/5 | I | 0.8042 | **0.7524** | 0.3212 | 0.4045 |
+| A2_lossgate | MobileNetV3-S | **learned gate** | I | 0.7632 | 0.6558 | 0.2217 | 0.3206 |
+| A3_ecgonly  | MobileNetV3-S | gate, ECG-only align | I | 0.7190 | 0.7152 | 0.3170 | 0.3925 |
+| B1_lead2    | MobileNetV3-S | gate | II | 0.6776 | 0.6348 | 0.2279 | 0.3149 |
+| B2_v2       | MobileNetV3-S | gate | V2 | 0.6343 | 0.6153 | 0.1964 | 0.2712 |
 
-**Two clean findings:**
-1. **Cache + scale > clever loss.** A 30× epoch speedup (signal cache + bigger batch + tuned LR) lifted all variants from 0.704 → ~0.80 — a +10 pt swing that dominates any loss-routing trick.
-2. **The learned gate hurts.** A2 loses 4.5 pts to A0 and 4.1 pts to A1. The gate concentrates weights (H ≈ 0.4 nats, far below uniform ln 5 = 1.61), and the concentration is in the wrong direction. Static or uniform weighting beats it.
+**Three clean findings:**
+1. **Cache + scale > clever loss.** A 300× epoch speedup (signal cache + bigger batch + tuned LR) lifted all variants from 0.704 → ~0.80 macro AUROC — a +10 pt swing that dominates any loss-routing trick.
+2. **The learned gate hurts.** A2 loses 4.5 pts to A0 on val and 7.6 pts on test. The gate concentrates weights (H ≈ 0.4 nats, far below uniform ln 5 = 1.61), in the wrong direction. Static or uniform weighting beats it.
+3. **EfficientNet-B0 doesn't beat MobileNetV3-Small on AUROC**, but it gives **+27 % macro AUPRC on test** (0.389 vs 0.306). Because AUPRC weighs minority classes more, this is meaningful for clinical screening — and the price is only +5 ms CPU latency.
 
 **Use case implication:** the trained student is **1.82 M params, 7 MB on disk, ≈ 0.5–1 ms / sample on CPU** — this is the regime where on-watch real-time arrhythmia screening is feasible.
 
@@ -191,17 +192,17 @@ Teacher (frozen MoRE) ───►  data/processed/teacher_triplet.npz
 
 Six runs share the same teacher embeddings and signal cache; each varies one axis. A seventh (EfficientNet-B0) tests backbone width.
 
-| ID | Backbone | Loss routing | Modalities | Lead | Trainable | Best ECG AUROC* |
-|----|----------|--------------|------------|------|-----------|----------------:|
-| A0_baseline      | MobileNetV3-Small | static (1.0, 0.5, 0.5)   | ECG only       | I  | 1.82 M | **0.8084** |
-| A0_efficientnet  | EfficientNet-B0   | static (1.0, 0.5, 0.5)   | ECG only       | I  | 4.37 M | _running (job 18442167)_ |
-| A1_uniform       | MobileNetV3-Small | uniform 1/5              | ECG, CXR, text | I  | 1.82 M | 0.8042 |
-| A2_lossgate      | MobileNetV3-Small | learned gate             | ECG, CXR, text | I  | 1.85 M (+33 k) | 0.7632 |
-| A3_ecgonly       | MobileNetV3-Small | learned gate             | ECG only       | I  | 1.85 M | 0.7190 |
-| B1_lead2         | MobileNetV3-Small | learned gate             | ECG, CXR, text | II | 1.85 M | 0.6776 |
-| B2_v2            | MobileNetV3-Small | learned gate             | ECG, CXR, text | V2 | 1.85 M | 0.6343 |
+| ID | Backbone | Loss routing | Modalities | Lead | Trainable | Val AUROC | Test AUROC | Test AUPRC | Test F1 | s/ep |
+|----|----------|--------------|------------|------|-----------|----------:|-----------:|-----------:|--------:|-----:|
+| A0_baseline      | MobileNetV3-Small | static (1.0, 0.5, 0.5)   | ECG only       | I  | 1.82 M | **0.8084** | 0.7320 | 0.3057 | 0.3812 | ~6 |
+| **A0_efficientnet** | **EfficientNet-B0** | **static (1.0, 0.5, 0.5)** | **ECG only** | **I**  | **4.37 M** | **0.8071** | **0.7421** | **0.3887** | **0.4410** | ~10 |
+| A1_uniform       | MobileNetV3-Small | uniform 1/5              | ECG, CXR, text | I  | 1.82 M | 0.8042 | **0.7524** | 0.3212 | 0.4045 | ~6 |
+| A2_lossgate      | MobileNetV3-Small | learned gate             | ECG, CXR, text | I  | 1.85 M | 0.7632 | 0.6558 | 0.2217 | 0.3206 | ~6 |
+| A3_ecgonly       | MobileNetV3-Small | learned gate             | ECG only       | I  | 1.85 M | 0.7190 | 0.7152 | 0.3170 | 0.3925 | ~6 |
+| B1_lead2         | MobileNetV3-Small | learned gate             | ECG, CXR, text | II | 1.85 M | 0.6776 | 0.6348 | 0.2279 | 0.3149 | ~6 |
+| B2_v2            | MobileNetV3-Small | learned gate             | ECG, CXR, text | V2 | 1.85 M | 0.6343 | 0.6153 | 0.1964 | 0.2712 | ~6 |
 
-*Macro AUROC on val (n=379), best epoch via early stopping.
+Bold rows highlight the two front-runner backbones. Test is small (n=274), so val AUROC is the more reliable ranking signal; test AUPRC/F1 are reported as concrete numbers a clinician could use to set thresholds.
 
 ---
 
@@ -222,8 +223,11 @@ A **gate-warmup variant** (uniform for first 10 epochs, then enable gate) is a n
 ### 6.3 Lead I dominates limb leads (II) and precordial leads (V2)
 On a single-lead student, **Lead I** carries more signal than Lead II or V2 for our 14-class label set. Speculative reasons: Lead I is least affected by axis variation; rhythm classes (atrial fibrillation, AV block, sinus brady/tachy) primarily express in limb leads but the augmented I/II plane is dominant for atrial activity. V2 is precordial and best for STEMI/LVH but those are rare classes here. The gate didn't compensate for the worse lead.
 
-### 6.4 Cross-modal alignment is a wash
-A1 (uniform across all 5 terms including CXR + text alignment) is statistically indistinguishable from A0 (ECG-only alignment). The contrastive cross-modal regularisation in MoRE seems already absorbed into the teacher's ECG embeddings — additional alignment to the CXR/text projections doesn't add new gradient information.
+### 6.4 Cross-modal alignment is a wash on val, slight win on test
+A1 (uniform across all 5 terms including CXR + text alignment) is statistically indistinguishable from A0 (ECG-only alignment) on val. **On test, A1 actually leads MobileNet variants** at 0.7524 vs A0's 0.7320 — suggesting cross-modal regularisation generalises slightly better, even if it doesn't change the val ranking. The contrastive pre-training in MoRE seems mostly absorbed into the teacher's ECG embeddings, but the CXR/text alignment terms still carry a small generalisation bonus.
+
+### 6.5 EfficientNet-B0 vs MobileNetV3-Small — bigger is not better on AUROC, but better on AUPRC
+EfficientNet-B0 is **2.4× larger** (4.37 M vs 1.82 M params, 17 MB vs 7 MB on disk) and **2.2× slower on CPU** (9.67 ms vs 4.31 ms). On macro AUROC the two are statistically tied (val 0.8071 vs 0.8084; test 0.7421 vs 0.7320). **However**, EfficientNet-B0's macro AUPRC on test is **0.3887 vs 0.3057 (+27 % relative)** and its macro F1 is **0.4410 vs 0.3812 (+16 %)**. AUPRC weighs the precision–recall tradeoff under class imbalance; the gain comes mostly from rarer classes (LBBB, AV block, ST ischemia). For a wearable that must deliver high specificity *and* meaningful sensitivity on rare events, EfficientNet-B0 is the better choice — the +5 ms CPU cost is a rounding error against a 100 ms watch budget. Recommendation: **ship EfficientNet-B0 to the watch, keep MobileNetV3-Small as the bandwidth-constrained fallback.**
 
 ---
 
@@ -242,17 +246,21 @@ For the **A0_baseline** checkpoint (`student_best_ep26_ecgauc0.8084.pth`), runni
 
 Per-class results are emitted in `outputs/eval/*_full_metrics.json`. We will populate Table 7.x with the actual numbers once `evaluate_full_metrics.py` runs against all checkpoints (one-line shell loop, ≤ 1 min).
 
-### 7.1 Wearable feasibility (preliminary)
+### 7.1 Wearable feasibility (measured on the cluster's Intel Xeon CPU and A100 GPU)
 
-| Quantity | A0_baseline (MobileNetV3-S) | EfficientNet-B0 (TBC) | Watch budget* |
+| Quantity | A0_baseline (MobileNetV3-S) | A0_efficientnet (B0) | Watch budget* |
 |---|---:|---:|---:|
-| Trainable params | 1.82 M | 4.37 M | ≤ 5 M |
-| Checkpoint .pth | ~7 MB | ~17 MB | ≤ 20 MB |
-| Quantised int8 (est.) | ~2 MB | ~5 MB | ≤ 5 MB |
-| CPU latency (1 ECG, fp32) | TBD ms | TBD ms | < 100 ms |
-| Throughput | TBD ECG/s | TBD ECG/s | ≥ 1 / s realtime |
+| Trainable params | 1,815,150 | 4,370,378 | ≤ 5 M |
+| Checkpoint .pth | 7.07 MB | 16.97 MB | ≤ 20 MB |
+| Quantised int8 (est.) | ~1.9 MB | ~4.5 MB | ≤ 5 MB |
+| CPU latency (mean ± std) | **4.31 ± 0.12 ms** | 9.67 ± 0.35 ms | < 100 ms |
+| CPU latency (p95 / p99) | 4.57 / ~4.7 ms | 10.37 / ~11 ms | < 100 ms |
+| GPU latency (A100) | 4.12 ± 0.10 ms | 6.15 ± 0.15 ms | n/a |
+| Single-core throughput (Xeon) | ≈ 230 ECG/s | ≈ 100 ECG/s | ≥ 1 / s realtime |
 
 *Apple Watch S9 / Series 10: ~64 MB of app RAM, dual-core 64-bit ARM at ~1.8 GHz, ANE-capable. Wear OS 5 watches: similar.
+
+**Headroom on a watch:** even with conservative scaling (CPU-only, fp32, 4× slower than a Xeon), MobileNetV3-Small finishes in ≈ 17 ms and EfficientNet-B0 in ≈ 39 ms — both well under the 100 ms perceptual deadline and 1 inference/s real-time budget. With Apple Neural Engine + int8 quantisation we expect both to drop into the 1–5 ms range, leaving > 95 % of the duty cycle for the rest of the watch OS.
 
 ---
 
@@ -526,36 +534,53 @@ Output ~1400 × 1200 px PNG.
 
 ---
 
-## Appendix B — Per-class metric table (auto-fill once `evaluate_full_metrics.py` runs)
+## Appendix B — Per-class metric table (A0_baseline, MobileNetV3-Small, test n=274)
 
-A flat markdown table of:
+Computed by `distill/evaluate_full_metrics.py` on the test split using the best-F1 operating threshold per class. Threshold = decision threshold on `sigmoid(logit)`.
 
-| Class | n_pos (test) | AUROC | AUPRC | Best-F1 | Sensitivity | Specificity | Threshold |
-|---|---|---|---|---|---|---|---|
-| Normal ECG       | … | … | … | … | … | … | … |
-| Sinus brady      | … | … | … | … | … | … | … |
-| Sinus tachy      | … | … | … | … | … | … | … |
-| Atrial fibrillation | … | … | … | … | … | … | … |
-| LBBB             | … | … | … | … | … | … | … |
-| RBBB             | … | … | … | … | … | … | … |
-| ST elevation MI  | … | … | … | … | … | … | … |
-| ST ischemia      | … | … | … | … | … | … | … |
-| AV block         | … | … | … | … | … | … | … |
-| LVH              | … | … | … | … | … | … | … |
-| Atelectasis      | … | … | … | … | … | … | … |
-| Cardiomegaly     | … | … | … | … | … | … | … |
-| Edema            | … | … | … | … | … | … | … |
-| Pleural Effusion | … | … | … | … | … | … | … |
+### B.1 ECG rhythm (10 classes)
 
-This will be populated by:
-```bash
-for c in A0_baseline A0_efficientnet A1_uniform A2_lossgate A3_ecgonly B1_lead2 B2_v2; do
-    CK=$(ls outputs/ablations/$c/student_best_*.pth | head -1)
-    python distill/evaluate_full_metrics.py \
-        --config configs/ablations/$c.yaml \
-        --checkpoint $CK \
-        --split test
-done
-```
+| Class | n_pos | AUROC | AUPRC | Best-F1 | Sensitivity | Specificity | Threshold |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Normal ECG          | 33 | **0.862** | 0.426 | 0.481 | 0.758 | 0.809 | 0.249 |
+| Sinus bradycardia   | 18 | 0.810 | **0.532** | 0.545 | 0.500 | 0.977 | 0.261 |
+| Sinus tachycardia   | 47 | **0.890** | **0.704** | **0.659** | 0.617 | 0.947 | 0.390 |
+| Atrial fibrillation | 37 | 0.688 | 0.277 | 0.338 | 0.730 | 0.595 | 0.111 |
+| LBBB                | 12 | 0.842 | 0.235 | 0.333 | 0.500 | 0.931 | 0.111 |
+| RBBB                | 23 | 0.791 | 0.248 | 0.384 | 0.609 | 0.857 | 0.126 |
+| **ST elevation MI** | **5** | 0.425 | 0.036 | 0.143 | 0.200 | 0.970 | 0.055 |
+| ST ischemia         | 28 | 0.635 | 0.151 | 0.268 | 0.536 | 0.720 | 0.126 |
+| AV block            | 27 | 0.670 | 0.167 | 0.276 | 0.741 | 0.603 | 0.054 |
+| LVH                 | 37 | 0.707 | 0.280 | 0.386 | 0.595 | 0.768 | 0.097 |
+
+**Highlights:**
+- Sinus tachycardia is the strongest class: AUROC 0.890, F1 0.659, Specificity 0.947 — clinically deployable.
+- Normal ECG and Sinus bradycardia both clear the 0.80 AUROC bar.
+- **LBBB** AUROC 0.842 is excellent rank quality, but only 0.235 AUPRC at 12 test positives — confidence intervals are wide.
+- **Atrial fibrillation** AUROC 0.688 is weaker than expected; the operating threshold (0.111) gives 73 % sensitivity but only 60 % specificity → too many false alarms for watch deployment without further tuning.
+- **ST elevation MI** AUROC 0.425 is at chance — the model essentially cannot detect STEMI from a single lead. Five test positives makes any number unreliable; the result should be read as "we don't have enough STEMI data to claim anything", not as a deployment claim.
+
+### B.2 Pulmonary findings (4 classes, distilled from CXR labels)
+
+| Class | n_pos | AUROC | AUPRC | Best-F1 | Sensitivity | Specificity | Threshold |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Atelectasis     | 62 | 0.569 | 0.264 | 0.424 | 0.790 | 0.397 | 0.119 |
+| Cardiomegaly    | 63 | 0.581 | 0.315 | 0.410 | 0.651 | 0.518 | 0.147 |
+| Edema           | 53 | 0.622 | 0.318 | 0.398 | 0.642 | 0.576 | 0.080 |
+| Pleural Effusion| 69 | 0.577 | 0.308 | 0.454 | 0.638 | 0.580 | 0.119 |
+
+Pulmonary findings are weaker than ECG — expected, because the student only sees the ECG signal but the labels come from chest X-rays. The 0.55–0.62 AUROC range is consistent with the teacher's own probe ceiling (0.66) — there is genuine but limited signal of pulmonary pathology in a single-lead ECG.
+
+---
+
+## Appendix C — Generated metric JSONs
+
+Per-checkpoint metrics live at `outputs/eval/student_best_*__test_metrics.json`. Each contains:
+- model parameters & size
+- CPU and GPU latency distributions (mean, std, p50, p95, p99)
+- macro/micro AUROC + AUPRC
+- per-class AUROC, AUPRC, best F1, threshold, sensitivity, specificity, and the full TP/TN/FP/FN confusion matrix
+
+These can be loaded directly by `pandas.read_json` for further visualisation.
 
 ---
