@@ -1,271 +1,172 @@
 # more-clinical-distill
 
-**Branch:** `more-KD`
-**Goal:** Multimodal clinical pipeline for heart disease classification via knowledge distillation — multimodal MoRE teacher (ECG + CXR + Text) → lightweight single-lead ECG student (MobileNetV3-Small).
-**Data:** MIMIC-IV-ECG + MIMIC-CXR-JPG, 49,076 matched patient records.
-**HPC:** Texas A&M Grace cluster (A100 40GB), SLURM job scheduler.
+Distil a 280M-parameter multimodal teacher (**MoRE**: ECG + Chest X-Ray + Text) into a 1.82M-parameter single-lead **ECG student** that is small and fast enough to run on a smartwatch. Trained on MIMIC-IV-ECG + MIMIC-CXR-JPG (49,076 paired records) on the Texas A&M Grace cluster.
+
+| Backbone | Params | .pth size | CPU latency (1 ECG) | Test ECG AUROC | Test ECG AUPRC |
+|---|---:|---:|---:|---:|---:|
+| MobileNetV3-Small | 1.82 M | 7.07 MB | **4.31 ms** | 0.7320 | 0.3057 |
+| EfficientNet-B0   | 4.37 M | 16.97 MB | 9.67 ms | **0.7421** | **0.3887** |
+| Prior baseline (28 k records) | 1.82 M | 7.07 MB | n/a | 0.7043 (val) | n/a |
+
+> **Headline:** Pre-caching the ECG signal array + scaling batch size + tuning LR delivered a **+10 pt AUROC swing** vs the prior 28 k-record baseline. A learned ResidualLossGate over five distillation losses was tested and **does not help** (see `docs/team_report.md` §6).
 
 ---
 
-## HPC Setup Flow
+## Pipeline at a glance
 
-### 1. Clone and checkout branch
-```bash
-cd /scratch/user/dshekar
-git clone <repo_url> more-clinical-distill
-cd more-clinical-distill
-git checkout more-KD
-```
+![Model architecture](figures/Fig1_Model_Architecture.jpeg)
 
-### 2. Set up credentials (never committed)
-```bash
-cp .env.example .env
-# Edit .env and fill in PHYSIONET_USER and PHYSIONET_PASS
-```
+A frozen MoRE teacher emits 128-d embeddings for every record across three modalities (ECG, CXR, text). Those embeddings are pre-cached to `data/processed/teacher_triplet.npz`. The student is a MobileNetV3-Small (or EfficientNet-B0) that takes a single ECG lead, predicts ECG rhythm + pulmonary findings via two heads, and is supervised by BCE + cosine-alignment to the cached teacher embeddings.
 
-### 3. Conda environment
-Use existing env `deepship_xares2`, or create a fresh one if dependency conflicts arise:
-```bash
-# Check compatibility first:
-conda run -n deepship_xares2 python -c "import torch, timm, wfdb, peft, transformers"
+A second one-time cache (`data/processed/ecg_signals_100hz.npy`, 2.36 GB) holds all 12-lead waveforms resampled to 100 Hz, eliminating per-batch WFDB I/O and giving a **~300× epoch speedup**.
 
-# If needed, create a new env:
-conda create -n more_kd python=3.10
-conda activate more_kd
-pip install -r requirements.txt
-```
+![ResidualLossGate detail](figures/Fig2_Residual_LossGate.jpeg)
 
-### 4. Review and edit configs/paths.yaml
-All data paths are defined in `configs/paths.yaml`. Edit to match your local layout before running any scripts.
+The proposed ResidualLossGate (left out of the deployment student because it underperforms uniform/static weighting) routes per-sample loss weight by reading the student's embedding and its residuals to all three teacher modalities.
 
-### 5. Data download (Phase 2)
-```bash
-# Build download lists from manifest
-python scripts/build_download_lists.py
+![On-device deployment](figures/Fig3_ECG_Inference.jpeg)
 
-# Submit SLURM download job (reads .env for credentials)
-sbatch slurm/download_subset.slurm
-```
-
-### 6. Preprocess to MoRE format (Phase 3)
-```bash
-# Verify downloaded layout
-python scripts/verify_local_dataset_layout.py
-
-# Convert manifest + metadata to MoRE .npy format
-python scripts/convert_manifest_to_more_format.py
-```
-
-### 7. Smoke test pretraining (Phase 4)
-```bash
-sbatch slurm/smoke_test.slurm
-```
-
-### 8. Cache teacher ECG embeddings (Phase 5, prerequisite)
-```bash
-# Pre-compute 128-dim ECG embeddings from frozen MoRE teacher
-sbatch slurm/cache_teacher_embeddings.slurm
-# Outputs: data/processed/teacher_ecg_embeddings.npy  (N×128 float32)
-#          data/processed/teacher_ecg_study_ids.npy   (N,)
-```
-
-### 9. Distillation training (Phase 5)
-```bash
-sbatch slurm/distill_train.slurm
-# Best checkpoint auto-saved to outputs/distill/student_best_ep{N}_ecgauc{X}.pth
-```
-
-### 10. Evaluate student vs teacher probe (Phase 5)
-```bash
-# Auto-selects best checkpoint; runs on both val and test splits
-sbatch slurm/evaluate_student.slurm
-
-# Or specify a checkpoint explicitly:
-CKPT=outputs/distill/student_best_ep34_ecgauc0.7043.pth \
-  sbatch slurm/evaluate_student.slurm
-```
+The trained student fits comfortably in a smartwatch budget: 1.82 M params, ~7 MB on disk, < 5 ms on CPU. Suitable for continuous AFib screening, post-stroke surveillance, and AV-block alerting.
 
 ---
 
-## Dual-Head Student Architecture
+## Results
 
-The student is a MobileNetV3-Small backbone adapted for 1-D single-lead ECG input:
+![Ablation AUROC](figures/Fig4_Ablation_AUROC.png)
 
-```
-Input: (B, 1, 1000)  — Lead I at 100 Hz, 10 s
-  └─ MobileNetV3-Small backbone (modified for 1-D)
-       └─ 128-dim embedding
-            ├─ ecg_classifier  → (B, 10)  ECG rhythm logits    [primary head]
-            └─ pulm_classifier → (B, 4)   pulmonary logits     [secondary head]
-```
+![Training curves](figures/Fig5_Training_Curves.png)
 
-**Training loss:**
-```
-L = 1.0 × L_ecg_BCE  +  0.5 × L_pulm_BCE  +  0.5 × L_align
-```
-where `L_align = 1 - mean_cosine_similarity(student_emb, teacher_emb)`.
+![Per-class performance](figures/Fig6_PerClass_AUROC.png)
 
-**ECG rhythm classes (10):** Normal, Sinus bradycardia, Sinus tachycardia, Atrial fibrillation, LBBB, RBBB, ST elevation MI, ST ischemia, AV block, LVH
+![Latency vs AUROC](figures/Fig7_Latency_vs_AUROC.png)
 
-Labels parsed from `machine_measurements.csv` free-text report fields using regex matching.
-
-**Pulmonary classes (4):** Atelectasis, Cardiomegaly, Edema, Pleural Effusion
-Labels from CheXpert annotations, learned indirectly via embedding alignment with the multimodal teacher.
+Full per-class metrics, threshold tuning, and clinical interpretation are in [`docs/team_report.md`](docs/team_report.md).
 
 ---
 
-## Baseline Results (Run 1 — epoch 34 best checkpoint)
-
-Evaluated on val set. Teacher probe = `MultiOutputClassifier(LogisticRegression)` fit on teacher embeddings from train split — represents the ceiling achievable from teacher embeddings alone.
-
-### ECG Rhythm Head (primary)
-
-| Class | Student AUC | Teacher probe AUC |
-|---|---|---|
-| Normal | 0.632 | — |
-| Sinus bradycardia | 0.932 | — |
-| Sinus tachycardia | 0.784 | — |
-| Atrial fibrillation | 0.523 | — |
-| LBBB | 0.984 | — |
-| RBBB | 0.614 | — |
-| ST elevation MI | 0.614 | — |
-| ST ischemia | 0.704 | — |
-| AV block | 0.569 | — |
-| LVH | 0.567 | — |
-| **MACRO** | **0.7043** | **0.9332** |
-
-### Pulmonary Head (secondary, via distillation)
-
-| Class | Student AUC | Teacher probe AUC |
-|---|---|---|
-| Atelectasis | 0.484 | 0.6283 |
-| Cardiomegaly | 0.463 | 0.6371 |
-| Edema | 0.485 | 0.7212 |
-| Pleural Effusion | 0.463 | 0.6518 |
-| **MACRO** | **0.4735** | **0.6596** |
-
-**Embedding cosine similarity (student vs teacher): 0.5821**
-
-Notes:
-- ECG head macro AUC of 0.70 is a strong first-run result given single-lead input only.
-- Pulm head near-random (0.47) on run 1 — expected, as the student sees no CXR. Planned ablations: increase `gamma` (alignment weight), try higher-capacity backbone.
-- Teacher probe ECG AUC (0.93) reflects full multimodal context (ECG + CXR + text); the relevant ECG-only baseline comparison is TBD.
-
----
-
-## Folder Structure
+## Repo layout
 
 ```
 more-clinical-distill/
+├── Readme.md                   # this file
+├── CLAUDE.md                   # detailed project context (read for engineering work)
+├── plan.md                     # forward execution plan
 ├── configs/
-│   ├── paths.yaml               # data paths config
-│   ├── smoke_test.yaml          # teacher smoke-test config
-│   └── distill_config.yaml      # student distillation config
-├── data/                        # gitignored — raw downloads and processed arrays
-│   ├── mimic-iv-ecg/
-│   ├── mimic-cxr-jpg/
-│   └── processed/               # MoRE-format .npy files + teacher embedding cache
+│   ├── paths.yaml              # all data/output paths
+│   ├── distill_config.yaml     # training hyperparameters
+│   └── ablations/              # 7 ablation configs (A0–B2 + EfficientNet)
+├── data/
+│   ├── ecg_flat/               # 49,076 × {study_id}.{hea,dat}
+│   ├── cxr_flat/               # 49,071 × {dicom_id}.jpg
+│   ├── combined_reports.csv    # paired ECG + CXR text
+│   └── processed/
+│       ├── more_{train,val,test}.npy
+│       ├── ecg_signals_100hz.npy        # (49076, 1000, 12) cache
+│       ├── ecg_signal_ids.npy
+│       └── teacher_triplet.npz          # cached teacher ECG/CXR/text embeddings
 ├── distill/
-│   ├── student_model.py         # MobileNetV3-Small dual-head student
-│   ├── distill_dataset.py       # Dataset: ECG signal + teacher emb + labels
-│   ├── distill_train.py         # Training loop with dual-head loss
-│   ├── evaluate_student.py      # Benchmark: student vs teacher linear probe
-│   └── cache_teacher_embeddings.py  # Pre-compute teacher ECG embeddings
-├── docs/                        # Audit docs and implementation plans
-├── logs/                        # SLURM logs (gitignored)
-├── manifests/                   # Download lists (gitignored)
-├── outputs/                     # Model checkpoints (gitignored)
-├── preprocessing/               # Original MoRE preprocessing scripts
+│   ├── student_model.py        # configurable MobileNetV3-Small / EfficientNet-B0
+│   ├── distill_dataset.py      # mmap fast path + WFDB fallback
+│   ├── distill_train.py        # training loop with gate + DistillationLoss
+│   ├── loss_gate.py            # ResidualLossGate
+│   ├── distill_loss.py         # 5-term per-sample loss
+│   ├── evaluate_full_metrics.py# AUROC, AUPRC, F1, Se/Sp, latency
+│   └── evaluate_student.py     # legacy AUROC-only benchmark
 ├── scripts/
-│   ├── convert_manifest_to_more_format.py  # Build train/val/test .npy splits
-│   └── ...
+│   ├── cache_ecg_signals.py    # build ECG signal cache (~3 min)
+│   ├── submit_ablations.sh     # fan out all 7 SLURM jobs
+│   ├── collect_ablation_results.py  # → outputs/ablation_results.csv
+│   └── generate_report_figures.py   # builds Fig4–Fig7 from logs + eval JSONs
 ├── slurm/
+│   ├── cache_signals.slurm
+│   ├── run_ablation.slurm
 │   ├── distill_train.slurm
-│   ├── evaluate_student.slurm
-│   ├── cache_teacher_embeddings.slurm
-│   └── ...
-├── utils/                       # Original MoRE utilities
-├── .env.example                 # Credential template (copy to .env, never commit)
-├── pretrain_multimodel.py
-└── requirements.txt
+│   └── …
+├── tests/                      # 37 TDD tests for gate + loss
+├── figures/                    # report figures (jpegs + matplotlib pngs)
+├── outputs/
+│   ├── ablations/<run>/        # per-run student_best_*.pth
+│   ├── eval/                   # full-metric JSONs per checkpoint
+│   └── ablation_results.csv
+└── docs/
+    └── team_report.md          # publishable report (start here for the science)
 ```
 
 ---
 
-## Original MoRE README
+## Quickstart on Grace
 
-### Please Cite this work as:
-@article{thapa2024more,
-  title={MoRE: Multi-Modal Contrastive Pre-training with Transformers on X-Rays, ECGs, and Diagnostic Report},
-  author={Thapa, Samrajya and Howlader, Koushik and Bhattacharjee, Subhankar and others},
-  journal={arXiv preprint arXiv:2410.16239},
-  year={2024}
-}
+### 1. Environment
 
-# MoRE: MultiModal Contrastive Pretraining of X-ray, ECG, and Report
+Use `deepship_xares2` (preinstalled with `torch`, `timm`, `wfdb`, `peft`, `transformers`):
 
-![MoRE Framework](./diagramMultimodal_final.png)
+```bash
+conda activate /scratch/user/dshekar/.conda/envs/deepship_xares2
+```
 
-MoRE is a pretraining framework which synergestically aligns Xray, ECG, and Diagnostic Report of same patient with Contrastive Learning. The Clinical Report (Cardiology Report and Radiology Report) are combined together and acts an anchor to align the Xray and ECG in a multimodal space, we show this via Multi-Modal Retrieval by retrieving Xray and ECG data via a single text query (refer to Section 4.6.3 MultiModal Retrieval in Paper), we also adapt TransLRP to show multimodal attention visualization to provide explanation of multimodal input for diagnosis (refer to section 4.6.3 Gradient Based LRP attention visualization). MoRE beats baseline GLoRIA, MedKLIP in Mimic IV Xray dataset on 4 labels (Atelectasis, Cardiomegaly, Edema, Effusion) and beats baselines in PtbXL ECG dataset for superclass labels. MoRE outperforms its baselines in Zero-shot classification as well showcasing its strong representation learning capability. MoRE also utilizes PEFT LoRA strategy to fine-tune the LLM during pre-training effectively only training 0.6% of original parameters of the LLM significantly reducing training time. 
+### 2. Build caches (once)
 
-## Setting up the Environment
+```bash
+sbatch slurm/cache_signals.slurm     # 3 min on the short partition, ~2.36 GB output
+```
 
-1. **Create a virtual environment**:
-   ```bash
-   python -m venv myenv
-   ```
+The teacher triplet cache (`teacher_triplet.npz`) is already present; rebuild via `distill/cache_teacher_embeddings.py` only if you re-run the teacher.
 
-2. **Install the required dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+### 3. Run the full ablation sweep
 
-## Pre-Train MoRE
+```bash
+bash scripts/submit_ablations.sh                  # submit all 7 jobs
+# or one at a time
+bash scripts/submit_ablations.sh A0_baseline
+```
 
-1. **Download the required datasets** from Physionet (datasets are not attached due to credential requirements for data signing).
-   
-2. **Add the datasets** to the appropriate folder.
+Each job runs ~3–10 min wall-clock on a single A100 with the cache enabled.
 
-3. **Preprocess the data** (preprocessing code is included).
+### 4. Aggregate and evaluate
 
-4. **Run the pretraining script**:
-   ```bash
-   python pretrain_multimodel.py
-   ```
-   Add arguments as needed; default settings are provided.
+```bash
+python scripts/collect_ablation_results.py        # → outputs/ablation_results.csv
+for c in A0_baseline A0_efficientnet A1_uniform A2_lossgate A3_ecgonly B1_lead2 B2_v2; do
+    CK=$(ls outputs/ablations/$c/student_best_*.pth | head -1)
+    python distill/evaluate_full_metrics.py \
+        --config configs/ablations/${c}.yaml \
+        --checkpoint "$CK" --split test
+done
+python scripts/generate_report_figures.py         # → figures/Fig4–Fig7.png
+```
 
-## Fine-tune in Mimic/Chexpert
+### 5. Tests
 
-1. **Ensure that the pre-trained model is saved**.
+```bash
+pytest tests/ -v                                  # 37 tests, ~10 s
+```
 
-2. **Run the fine-tuning script**:
-   ```bash
-   python multimodal_infer.py
-   ```
-   Make sure to change the data paths and model paths as needed.
+---
 
-## Zero-Shot Classification
+## Data sources
 
-1. **Run the zero-shot classification script**:
-   ```bash
-   python zero_shot_xray/ecg_more.py
-   ```
-   Update data paths or parameters as necessary.
+| Source | Records | Notes |
+|---|---|---|
+| MIMIC-IV-ECG v1.0 | 49,076 12-lead WFDB | 500 Hz × 10 s, 12 leads |
+| MIMIC-CXR-JPG v2.1.0 | 49,071 PA/AP JPEGs | 5 absent on PhysioNet |
+| Combined reports CSV | 49,076 paired text rows | ECG + CXR reports |
 
-## Retrieval Tasks
+Both datasets are gated on PhysioNet — set `PHYSIONET_USER` and `PHYSIONET_PASS` in a local `.env` (never committed).
 
-1. **Check the `xray_ecg_retrieval.ipynb` notebook** for an example of multimodal retrieval.
+---
 
-2. **Run the X-ray retrieval script**:
-   ```bash
-   python xray_retrieval.py
-   ```
+## Cluster-specific notes
 
-## t-SNE Plot
+- **Cluster:** TAMU HPRC Grace, SLURM
+- **GPU partitions:** `gpu`, `medium` (A100 40 GB)
+- **CPU partition:** `short` (used by `cache_signals.slurm`)
+- **Proxy required for `wget` from compute nodes:** `http://10.73.132.63:8080`
+- **Inode quota:** 500 k (currently ~260 k used after the flatten migration)
 
-1. **Check the `tnse_plot.ipynb` notebook** for an example of a t-SNE plot of features.
+---
 
-## Model Weights
+## License & acknowledgements
 
-Link: https://drive.google.com/file/d/1BB9dT6iYihqJarD5qX0bdnfYhiwhBgmH/view?usp=share_link 
-Change layer names, drop any weights if extra as needed through pytorch 
+- MoRE teacher weights from [`chenxshuo/MoRE`](https://github.com/chenxshuo/MoRE).
+- MIMIC datasets via PhysioNet; downstream use must comply with the PhysioNet DUA.
+- TAMU HPRC for compute.

@@ -92,7 +92,7 @@ more-clinical-distill/
     ├── assumptions.md          # All validated assumptions (A1–A12)
     ├── distillation_plan.md    # Architecture + loss design detail
     ├── implementation_plan.md  # Phase-by-phase execution history
-    └── progress_report.tex     # Course progress report (ECEN 766)
+    └── progress_report.tex     # Progress report (LaTeX)
 ```
 
 ---

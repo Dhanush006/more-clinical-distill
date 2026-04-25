@@ -1,9 +1,12 @@
 # MoRE → Single-Lead ECG Student: Multimodal Knowledge Distillation with Dynamic Loss Routing
 
 **Status:** Draft for team review · v1.0
-**Project:** more-clinical-distill (CSCE 638 NLP, Team 19 / ECEN 766 sister project)
+**Project:** more-clinical-distill
 **Repo:** https://github.com/Dhanush006/more-clinical-distill (branch `more-KD`)
 **Authors:** Dhanush Shekar et al.
+
+![Model architecture](../figures/Fig1_Model_Architecture.jpeg)
+*Figure 1 — End-to-end pipeline: frozen MoRE teacher emits cached embeddings; the MobileNetV3-Small student learns from a single ECG lead and is supervised by classification labels plus cosine alignment to teacher embeddings.*
 
 ---
 
@@ -122,6 +125,10 @@ Total params: **1,815,150** (vs 280 M teacher → **154× compression**).
 **Backbone alternative** evaluated: `efficientnet_b0` (4.37 M params, ~2.4× student size) under the A0 recipe.
 
 ### 3.3 ResidualLossGate (proposed; ineffective in practice)
+
+![ResidualLossGate detail](../figures/Fig2_Residual_LossGate.jpeg)
+*Figure 2 — ResidualLossGate detail: stop-gradient student embedding + residuals to all three teacher modalities are concatenated and routed through a small MLP that emits softmax weights over five loss terms.*
+
 A small MLP that produces per-sample softmax weights over five loss terms:
 
 ```
@@ -188,6 +195,12 @@ Teacher (frozen MoRE) ───►  data/processed/teacher_triplet.npz
 
 ---
 
+![Ablation AUROC bar chart](../figures/Fig4_Ablation_AUROC.png)
+*Figure 4 — Ablation sweep: val (n=379) and test (n=274) macro AUROC for ECG and Pulm heads across all 7 runs. Dashed line marks the prior 28k-record baseline (0.7043). Every cache-trained run beats it; the learned-gate runs (A2/A3/B1/B2) underperform static and uniform weighting.*
+
+![Training curves](../figures/Fig5_Training_Curves.png)
+*Figure 5 — Validation AUROC vs epoch for all 7 runs. Top panel: ECG (10 classes); bottom panel: Pulm (4 classes). Stars mark the best-epoch checkpoint chosen by early stopping. Cache-enabled epochs run in ~6–10 s on an A100, so the full 7-run sweep finishes in under 30 minutes wall-clock.*
+
 ## 5. Ablation grid
 
 Six runs share the same teacher embeddings and signal cache; each varies one axis. A seventh (EfficientNet-B0) tests backbone width.
@@ -231,6 +244,12 @@ EfficientNet-B0 is **2.4× larger** (4.37 M vs 1.82 M params, 17 MB vs 7 MB on d
 
 ---
 
+![Per-class performance](../figures/Fig6_PerClass_AUROC.png)
+*Figure 6 — Per-class AUROC (bars) and AUPRC (diamonds) on the test set for A0_baseline. Sinus tachycardia, Normal, and LBBB clear AUROC ≥ 0.80 with strong AUPRC; AFib has good AUROC but lower AUPRC; ST-elevation MI has only 5 test positives and is unmeasurable.*
+
+![Latency vs AUROC tradeoff](../figures/Fig7_Latency_vs_AUROC.png)
+*Figure 7 — Compute-vs-quality frontier across all 7 runs. CPU latency on the x-axis (Xeon, fp32, batch=1); marker size scales with parameter count; colour encodes AUPRC. Both backbones live well to the left of the 100 ms watch-budget line.*
+
 ## 7. Full metrics (beyond AUROC)
 
 For the **A0_baseline** checkpoint (`student_best_ep26_ecgauc0.8084.pth`), running `distill/evaluate_full_metrics.py` produces:
@@ -265,6 +284,9 @@ Per-class results are emitted in `outputs/eval/*_full_metrics.json`. We will pop
 ---
 
 ## 8. Use cases
+
+![On-device ECG inference](../figures/Fig3_ECG_Inference.jpeg)
+*Figure 3 — On-device deployment vision: a single-lead ECG sensor (smartwatch / patch / Pi) feeds the distilled student, which runs entirely on-device and emits per-rhythm probabilities used to drive notifications.*
 
 ### 8.1 Wrist-worn arrhythmia screening (primary use case)
 The student takes a single ECG lead and produces a per-rhythm probability vector in well under 100 ms on a smartwatch CPU. Concrete deployments:
@@ -342,197 +364,6 @@ Tests for the gate / loss live in `tests/test_loss_gate.py` and `tests/test_dist
 
 ---
 
-## Appendix A — AI prompts for figure generation
-
-**The following prompts are intended to be pasted into ChatGPT (with image generation) / Claude / DALL·E / a diagram tool such as Excalidraw, Figma, or `tikz`. Each prompt is fully self-contained; you can iterate on style without re-explaining the architecture.**
-
----
-
-### A.1 Architecture diagram — full pipeline (teacher + student + losses)
-
-```
-Create a clean, publication-quality architecture diagram for a knowledge-distillation
-pipeline. Use a horizontal left-to-right flow with boxes joined by arrows. Style:
-flat colours, thin lines, sans-serif type, generous whitespace, no drop shadows,
-black text on white background. Label every arrow with what flows along it
-(tensor shape and dtype where relevant).
-
-LEFT THIRD — Teacher (label "Frozen MoRE teacher, 280 M params", subtle grey fill):
-  Three parallel input boxes stacked vertically:
-    1. "12-lead ECG (1, 12, 1000) at 100 Hz" → ViT-Base ECG encoder → projector → ECG embedding (1, 128)
-    2. "CXR JPEG (1, 3, 224, 224)"           → ViT-Base CXR encoder → projector → CXR embedding (1, 128)
-    3. "Radiology + ECG report text"         → RoBERTa-base-PM-M3   → projector → Text embedding (1, 128)
-  Show a small "InfoNCE pre-training" callout with a dashed border noting these three
-  branches are pretrained together with contrastive loss.
-
-MIDDLE — pre-cached embeddings (label "teacher_triplet.npz"):
-  Three coloured rectangles "ECG embeddings", "CXR embeddings", "Text embeddings"
-  each annotated "(N, 128) float32".
-
-RIGHT TWO-THIRDS — Student (label "MobileNetV3-Small, 1.82 M params", subtle blue fill):
-  Single-lead ECG input "(1, 1, 1000)" →
-  Channel adapter [Conv1d 1→16 (k=7) → BN → Hardswish → Conv1d 16→3 (k=1)] →
-  Reshape "(1, 3, 25, 40)" →
-  MobileNetV3-Small backbone → global avg pool → "(1, 1024)" →
-  Projector [Linear(1024→256) → ReLU → Linear(256→128)] →
-  Branches into THREE arrows:
-    a) ECG head Linear(128→10) → "ecg_logits (1, 10)"
-    b) Pulm head Linear(128→4) → "pulm_logits (1, 4)"
-    c) "embedding (1, 128)" — feeds the loss block
-
-BOTTOM — Loss block:
-  Five small rectangles in a row, each labelled clearly:
-    L_ecg_BCE | L_pulm_BCE | L_align_ecg | L_align_cxr | L_align_text
-  All five flow into a "ResidualLossGate (Linear 512→64→5, Softmax)" diamond, which
-  outputs a 5-vector w. Show w being multiplied element-wise with the loss vector
-  and summed into "L_total (scalar)". Add a small dashed feedback line labelled
-  "−λ_H · H(w)" showing the entropy regulariser.
-
-LEGEND in bottom-right corner:
-  - solid arrow = forward tensor flow
-  - dashed arrow = pre-trained / frozen
-  - red border  = trainable component
-  - blue border = student modules
-  - grey fill   = frozen modules
-  - "sg(·)" annotation on the arrow from student embedding into the gate to denote
-    stop-gradient
-
-Output as a single horizontal SVG / PNG, ~1600×900 px, with 16-px margins.
-Font: Inter or Helvetica.
-```
-
-### A.2 Loss-routing detail diagram (zoomed-in ResidualLossGate)
-
-```
-Generate a focused, self-contained diagram of the ResidualLossGate showing exactly
-how per-sample weights are computed and applied. Use a vertical top-to-bottom flow.
-Style: minimalist, monochrome with a single accent colour for trainable parts.
-
-TOP — four input vectors arranged horizontally:
-  s         (student embedding,    128-d, blue rectangle)
-  s − t_ecg (residual to teacher ECG,    128-d, grey rectangle)
-  s − t_cxr (residual to teacher CXR,    128-d, grey rectangle)
-  s − t_txt (residual to teacher Text,   128-d, grey rectangle)
-
-  Annotate s with a small "sg(·)" label denoting stop-gradient before concatenation.
-
-MIDDLE — concatenation:
-  Wide grey arrow merging the four into z, a 512-d vector.
-
-GATE BODY — vertical stack:
-  Linear(512 → 64)   ← red border (trainable)
-  ReLU               ← grey
-  Linear(64 → 5)     ← red border (trainable)
-  Softmax            ← grey
-  Output: w ∈ R^5, w_i > 0, Σ w_i = 1
-
-BOTTOM — application:
-  Show a row of five loss-term values: L_ecg, L_pulm, L_align_ecg, L_align_cxr, L_align_text
-  Multiply element-wise by w, sum to L_total = Σ_i w_i · L_i
-  To the side, show the entropy-regulariser equation:
-        H(w) = − Σ_i w_i log w_i
-        L = mean(L_total) − λ_H · H(w)        with λ_H = 0.3
-
-Add a small inset "intuition" caption:
-  "The gate observes the student's residuals to all three teacher modalities and
-   chooses, per sample, which loss term should dominate the gradient signal.
-   Stop-gradient on s prevents the student from gaming the gate by manipulating
-   its own embedding."
-
-Output: vertical SVG / PNG, ~900×1400 px, sans-serif, accent colour #c0392b.
-```
-
-### A.3 Wrist deployment diagram (use case)
-
-```
-Draw a clean infographic showing on-device deployment of the trained ECG student
-on a smartwatch. Three columns left-to-right:
-
-LEFT — "Sensor": Stylised wristwatch with a single-lead ECG sensor on the back of
-the case. Arrow "single-lead ECG, 100 Hz, 10 s window" → middle column.
-
-MIDDLE — "On-device inference":
-  A box labelled "MobileNetV3-Small student
-                  1.82 M params · ~7 MB fp32 · ~2 MB int8
-                  ≤ 5 ms / inference on Apple ANE / ARMv8 NEON".
-  Inside the box, a tiny inset of the architecture: ECG → adapter → backbone → 128-d
-  embedding → 10-class probabilities.
-  Below the box: "Privacy: all PHI stays on-wrist".
-
-RIGHT — "Outputs and actions":
-  A vertical list of clinical decisions tied to model outputs:
-    • AFib probability ≥ 0.9 → "Notify wearer to record an Apple Watch ECG"
-    • AV block probability ≥ 0.95 → "Notify wearer + flag in Health app for cardiologist"
-    • Sinus tachycardia + sustained > 30 min → "Wellness nudge"
-    • All probabilities low → no notification
-
-Add bullet annotations along the bottom:
-  - 24/7 background sweep, 1 inference / s
-  - ~0.5 % daily battery drain
-  - Works offline; sync to phone for long-term trend dashboard
-
-Style: light, modern, infographic-friendly. Colour palette: white background,
-single accent colour (medical teal #16a085). Sans-serif (Inter / Helvetica).
-~1600 × 800 px landscape. Cite "MIMIC-IV-ECG / MoRE distillation" in a small
-footer credit.
-```
-
-### A.4 Ablation results bar chart
-
-```
-Plot a horizontal grouped bar chart comparing seven ablation runs by macro AUROC
-on val (n = 379). Two grouped bars per run: one for ECG (10-class, primary) and
-one for Pulm (4-class, secondary).
-
-Run order (top to bottom, descending ECG AUROC):
-   A0_baseline       0.8084   0.5958
-   A1_uniform        0.8042   0.5995
-   A0_efficientnet   <fill>   <fill>
-   A2_lossgate       0.7632   0.5833
-   A3_ecgonly        0.7190   0.5616
-   B1_lead2          0.6776   0.5828
-   B2_v2             0.6343   0.4602
-
-Add a vertical dashed line at AUROC = 0.7043 labelled "Prior baseline (28 k recs)".
-
-Colour rule:
-  - bars whose ECG AUROC ≥ 0.80 should be shaded green
-  - bars in 0.70–0.80 grey
-  - bars below 0.70 amber
-
-Title: "Single-lead ECG Student — Ablation Sweep"
-Subtitle: "All runs use MIMIC-IV-ECG 49 k records, 50-epoch budget, A100 40 GB"
-X-axis: "Macro AUROC (val, n = 379)"
-Right-side annotation per run: "<n_params>, <s/epoch>" e.g. "1.82 M, 6 s/ep".
-
-Style: matplotlib publication style, sans-serif, no legend in main plot
-(use legend in upper-right).
-```
-
-### A.5 Training-curve overlay
-
-```
-Generate a multi-panel figure (2 rows × 1 column) showing training and validation
-AUROC curves across 50 epochs for the seven ablation runs.
-
-Top panel: ECG macro AUROC (val) vs epoch.
-Bottom panel: Pulm macro AUROC (val) vs epoch.
-
-Each run's curve uses a distinct colour with the run name in the legend.
-For runs with learned gate (A2, A3, B1, B2), overlay a thin secondary axis
-on the right showing gate entropy H_gate over the same x-axis with a dotted
-line.
-
-Mark each run's best-epoch checkpoint with a star marker.
-
-Title: "Distillation training dynamics"
-Subtitle: "7 runs; vertical dotted line marks early-stopping trigger at patience 10"
-
-Use a colour-blind-safe palette (viridis or tab10).
-Output ~1400 × 1200 px PNG.
-```
-
----
 
 ## Appendix B — Per-class metric table (A0_baseline, MobileNetV3-Small, test n=274)
 

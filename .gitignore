@@ -45,3 +45,6 @@ Thumbs.db
 # Slurm output (per-run logs, not scripts)
 slurm-*.out
 slurm-*.err
+
+# Local agent / planning scratch (not part of the project)
+docs/superpowers/
