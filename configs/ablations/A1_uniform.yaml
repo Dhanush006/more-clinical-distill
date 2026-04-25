@@ -1,0 +1,18 @@
+# A1 — uniform-equal
+# Uniform 1/6 weight on all 6 terms, all modalities, Lead I
+# Tests whether equal weighting of all modalities beats static 3-term baseline
+
+_extends: configs/distill_config.yaml
+
+outputs:
+  checkpoint_dir: outputs/ablations/A1_uniform
+  log_dir:        logs/ablations/A1_uniform
+
+loss_gate:
+  enabled:    false      # uniform 1/n weights (gate disabled → no MLP parameters)
+  lambda_h:   0.0
+  hidden_dim: 64
+  modalities: [ecg, cxr, text]
+
+student:
+  input_lead: 0   # Lead I

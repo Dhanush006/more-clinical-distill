@@ -1,0 +1,18 @@
+# A3 — lossgate-ecgonly
+# ResidualLossGate on 3 terms (ecg, pulm, align_ecg), ECG-only alignment, Lead I
+# Ablation: gate value without multi-modal teacher signals
+
+_extends: configs/distill_config.yaml
+
+outputs:
+  checkpoint_dir: outputs/ablations/A3_ecgonly
+  log_dir:        logs/ablations/A3_ecgonly
+
+loss_gate:
+  enabled:    true
+  lambda_h:   0.1
+  hidden_dim: 64
+  modalities: [ecg]
+
+student:
+  input_lead: 0   # Lead I

@@ -1,0 +1,18 @@
+# A0 — baseline-static
+# Fixed weights (1.0/0.5/0.5), ECG-only alignment, Lead I
+# Replicates the original 3-term loss (no gate, no cxr/text alignment)
+
+_extends: configs/distill_config.yaml
+
+outputs:
+  checkpoint_dir: outputs/ablations/A0_baseline
+  log_dir:        logs/ablations/A0_baseline
+
+loss_gate:
+  enabled:    false
+  lambda_h:   0.0
+  hidden_dim: 64
+  modalities: [ecg]
+
+student:
+  input_lead: 0   # Lead I

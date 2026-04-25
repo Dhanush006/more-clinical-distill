@@ -1,0 +1,17 @@
+# A2 — lossgate-full  ← PRIMARY CONTRIBUTION
+# ResidualLossGate on all 6 terms, all modalities, Lead I
+
+_extends: configs/distill_config.yaml
+
+outputs:
+  checkpoint_dir: outputs/ablations/A2_lossgate
+  log_dir:        logs/ablations/A2_lossgate
+
+loss_gate:
+  enabled:    true
+  lambda_h:   0.1
+  hidden_dim: 64
+  modalities: [ecg, cxr, text]
+
+student:
+  input_lead: 0   # Lead I

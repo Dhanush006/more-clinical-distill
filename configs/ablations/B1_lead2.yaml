@@ -1,0 +1,18 @@
+# B1 — lossgate-leadII
+# ResidualLossGate, all 6 terms, all modalities, Lead II (index 1)
+# Tests cross-lead generalisation of the gate
+
+_extends: configs/distill_config.yaml
+
+outputs:
+  checkpoint_dir: outputs/ablations/B1_lead2
+  log_dir:        logs/ablations/B1_lead2
+
+loss_gate:
+  enabled:    true
+  lambda_h:   0.1
+  hidden_dim: 64
+  modalities: [ecg, cxr, text]
+
+student:
+  input_lead: 1   # Lead II

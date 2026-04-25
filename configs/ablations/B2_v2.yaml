@@ -1,0 +1,18 @@
+# B2 — lossgate-V2
+# ResidualLossGate, all 6 terms, all modalities, Lead V2 (index 7)
+# Tests whether precordial lead offers different signal than limb leads
+
+_extends: configs/distill_config.yaml
+
+outputs:
+  checkpoint_dir: outputs/ablations/B2_v2
+  log_dir:        logs/ablations/B2_v2
+
+loss_gate:
+  enabled:    true
+  lambda_h:   0.1
+  hidden_dim: 64
+  modalities: [ecg, cxr, text]
+
+student:
+  input_lead: 7   # V2 (index 7 in MIMIC-IV-ECG lead order: I II III aVR aVF aVL V1 V2...)
