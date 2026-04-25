@@ -53,6 +53,8 @@ class DistillDataset(Dataset):
         triplet_cache:  str | None = None,
         embed_cache:    str | None = None,    # legacy fallback
         study_id_cache: str | None = None,   # legacy fallback
+        signal_cache:   str | None = None,   # (N, 1000, 12) float32 cache of all leads
+        signal_id_cache: str | None = None,  # parallel study-id array
         lead_idx:       int = 0,
         signal_length:  int = 1000,
         split:          str = "train",
@@ -63,6 +65,16 @@ class DistillDataset(Dataset):
 
         # Normalise split key: .npy stores 'validate', npz stores 'val'
         split_key = "val" if split in ("validate", "val") else split
+
+        # ── Pre-cached ECG signals (fast path) ────────────────────────
+        self.signals: np.ndarray | None = None
+        self.signal_lookup: dict[str, int] = {}
+        if signal_cache is not None and os.path.exists(signal_cache):
+            self.signals = np.load(signal_cache, mmap_mode="r")  # (N, 1000, 12) float32
+            if signal_id_cache and os.path.exists(signal_id_cache):
+                ids = np.load(signal_id_cache, allow_pickle=True)
+                self.signal_lookup = {str(s): i for i, s in enumerate(ids)}
+            print(f"[DistillDataset] Using ECG signal cache: {self.signals.shape} from {signal_cache}")
 
         # ── Load teacher embeddings from triplet_cache (preferred) ────
         self.ecg_embs:  np.ndarray | None = None
@@ -110,12 +122,16 @@ class DistillDataset(Dataset):
         valid = []
         for i, item in enumerate(self.data):
             ecg_stem = item[1]
-            if not os.path.exists(ecg_stem + ".hea"):
-                continue
-            if self.emb_lookup:
-                study_id = Path(ecg_stem).name
-                if study_id not in self.emb_lookup:
+            study_id = Path(ecg_stem).name
+            if self.signals is not None and self.signal_lookup:
+                # Fast path: only require presence in the signal cache; .hea stat skipped
+                if study_id not in self.signal_lookup:
                     continue
+            else:
+                if not os.path.exists(ecg_stem + ".hea"):
+                    continue
+            if self.emb_lookup and study_id not in self.emb_lookup:
+                continue
             valid.append(i)
         self.valid_indices = valid
 
@@ -132,20 +148,22 @@ class DistillDataset(Dataset):
         ecg_stem    = item[1]
         ecg_labels  = item[4].astype(np.float32)   # (10,) ECG rhythm labels
         pulm_labels = item[5].astype(np.float32)   # (4,)  CheXpert pulmonary
+        study_id    = Path(ecg_stem).name
 
-        # ── Load ECG via wfdb ─────────────────────────────────────────
-        import wfdb
-        from scipy.signal import resample as scipy_resample
-
-        sig, fields = wfdb.rdsamp(ecg_stem)          # (T, 12), fields dict
-        sig = np.nan_to_num(sig.astype(np.float32), nan=0.0)
-
-        orig_fs = fields["fs"]
-        if orig_fs != 100:
-            n_out = int(sig.shape[0] * 100 / orig_fs)
-            sig = scipy_resample(sig, n_out, axis=0)  # (1000, 12)
-
-        lead = sig[:, self.lead_idx]                 # (T,)
+        # ── Load ECG: cache fast path or wfdb fallback ────────────────
+        if self.signals is not None and study_id in self.signal_lookup:
+            # mmap read of the (1000, 12) slice for this study, then pick the lead
+            sig_idx = self.signal_lookup[study_id]
+            lead    = np.asarray(self.signals[sig_idx, :, self.lead_idx], dtype=np.float32)
+        else:
+            import wfdb
+            from scipy.signal import resample as scipy_resample
+            sig, fields = wfdb.rdsamp(ecg_stem)
+            sig = np.nan_to_num(sig.astype(np.float32), nan=0.0)
+            if fields["fs"] != 100:
+                n_out = int(sig.shape[0] * 100 / fields["fs"])
+                sig = scipy_resample(sig, n_out, axis=0)
+            lead = sig[:, self.lead_idx]
 
         if len(lead) >= self.signal_length:
             lead = lead[:self.signal_length]

@@ -1,7 +1,7 @@
 """
 distill/distill_loss.py
 
-DistillationLoss — 6-term per-sample loss with optional ResidualLossGate weighting.
+DistillationLoss — 5-term per-sample loss with optional ResidualLossGate weighting.
 
 Loss terms (all reduction='none' → shape (B,)):
     0  L_ecg_BCE    BCE on ECG rhythm logits vs labels
@@ -9,15 +9,21 @@ Loss terms (all reduction='none' → shape (B,)):
     2  L_align_ecg  1 - cosine_sim(student, teacher_ecg)
     3  L_align_cxr  1 - cosine_sim(student, teacher_cxr)
     4  L_align_text 1 - cosine_sim(student, teacher_text)
-    5  L_kl         KL(softmax(student/T) ‖ softmax(teacher/T))
 
 Total loss:
     For each sample i:
         L_total[i] = Σ_k  w[i,k] × term_k[i]
-    Scalar: mean(L_total) + entropy_reg(w)
+    Scalar: mean(L_total) − λ_H × H(w)
 
-When gate_enabled=False the gate returns uniform 1/6 weights.
-When modalities=("ecg",) align_cxr and align_text are skipped (gate uses 4 terms).
+When gate_enabled=False the gate returns uniform 1/n weights.
+When modalities=("ecg",) align_cxr and align_text are skipped (gate uses 3 terms).
+
+NOTE: A KL distillation term was originally planned but dropped — the teacher
+classification logits are not cached in the pipeline (only embeddings are), so
+the KL term would have been KL(student ‖ student.detach()) ≈ 0. The gate
+rationally collapsed onto that zero-loss term and starved the supervised
+signal (epoch 1 ECG AUC = 0.52 ≈ chance). Re-add only if teacher classification
+logits are cached.
 """
 
 from __future__ import annotations
@@ -28,9 +34,8 @@ import torch.nn.functional as F
 
 from loss_gate import ResidualLossGate
 
-# Indices of each term in the weight vector
-_IDX = {"ecg": 0, "pulm": 1, "align_ecg": 2, "align_cxr": 3, "align_text": 4, "kl": 5}
-_N_TERMS_FULL = 6
+_IDX = {"ecg": 0, "pulm": 1, "align_ecg": 2, "align_cxr": 3, "align_text": 4}
+_N_TERMS_FULL = 5
 _N_TERMS_ECG_ONLY = 3   # ecg, pulm, align_ecg (no cxr/text)
 
 
@@ -49,8 +54,8 @@ class DistillationLoss(nn.Module):
     def __init__(
         self,
         gate_enabled:    bool  = True,
-        lambda_h:        float = 0.1,
-        kl_temperature:  float = 4.0,
+        lambda_h:        float = 0.3,
+        kl_temperature:  float = 4.0,    # retained for backward-compat with kl_loss helper
         modalities:      tuple = ("ecg", "cxr", "text"),
         embedding_dim:   int   = 128,
         gate_hidden_dim: int   = 64,
@@ -125,23 +130,23 @@ class DistillationLoss(nn.Module):
         student_ecg_logits:  torch.Tensor,          # (B, 10)
         student_pulm_logits: torch.Tensor,          # (B, 4)
         student_emb:         torch.Tensor,          # (B, 128)
-        teacher_ecg_logits:  torch.Tensor,          # (B, 10)
         teacher_ecg_emb:     torch.Tensor,          # (B, 128)
         teacher_cxr_emb:     torch.Tensor,          # (B, 128)
         teacher_text_emb:    torch.Tensor,          # (B, 128)
         ecg_labels:          torch.Tensor,          # (B, 10)
         pulm_labels:         torch.Tensor,          # (B, 4)
+        teacher_ecg_logits:  torch.Tensor | None = None,  # accepted for back-compat, unused
     ) -> dict:
         """
         Returns:
             dict with keys: loss (scalar), L_ecg, L_pulm, L_align_ecg,
                             L_align_cxr, L_align_text, L_kl, gate_entropy
+            (L_kl is always 0.0 — KL term has been removed; key retained for log compat.)
         """
         # ── Per-sample terms ─────────────────────────────────────────
         L_ecg       = self.ecg_bce(student_ecg_logits, ecg_labels)      # (B,)
         L_pulm      = self.pulm_bce(student_pulm_logits, pulm_labels)   # (B,)
         L_align_ecg = self.align_ecg(student_emb, teacher_ecg_emb)      # (B,)
-        L_kl        = self.kl_loss(student_ecg_logits, teacher_ecg_logits)  # (B,)
 
         if self.use_cxr:
             L_align_cxr  = self.align_cxr(student_emb, teacher_cxr_emb)
@@ -153,24 +158,20 @@ class DistillationLoss(nn.Module):
         else:
             L_align_text = torch.zeros_like(L_ecg)
 
-        # ── Gate weights ─────────────────────────────────────────────
-        # Use only the active modality embeddings for gate input
         t_cxr_for_gate  = teacher_cxr_emb  if self.use_cxr  else teacher_ecg_emb
         t_text_for_gate = teacher_text_emb if self.use_text else teacher_ecg_emb
 
         w = self.gate(student_emb, teacher_ecg_emb, t_cxr_for_gate, t_text_for_gate)  # (B, n_terms)
 
-        # ── Stack active terms ───────────────────────────────────────
         if self.n_terms == _N_TERMS_FULL:
-            terms = torch.stack([L_ecg, L_pulm, L_align_ecg, L_align_cxr, L_align_text, L_kl], dim=1)
+            terms = torch.stack([L_ecg, L_pulm, L_align_ecg, L_align_cxr, L_align_text], dim=1)
         else:
             terms = torch.stack([L_ecg, L_pulm, L_align_ecg], dim=1)  # (B, 3)
 
-        # ── Gated scalar loss ────────────────────────────────────────
-        gated     = (w * terms).sum(dim=1)              # (B,)
+        gated     = (w * terms).sum(dim=1)
         base_loss = gated.mean()
         entropy   = ResidualLossGate.entropy(w)
-        reg       = ResidualLossGate.entropy_reg(w, self.lambda_h)  # negative (maximise H)
+        reg       = ResidualLossGate.entropy_reg(w, self.lambda_h)
         total     = base_loss + reg
 
         return {
@@ -180,6 +181,6 @@ class DistillationLoss(nn.Module):
             "L_align_ecg":   L_align_ecg.mean().item(),
             "L_align_cxr":   L_align_cxr.mean().item(),
             "L_align_text":  L_align_text.mean().item(),
-            "L_kl":          L_kl.mean().item(),
+            "L_kl":          0.0,
             "gate_entropy":  entropy.item(),
         }

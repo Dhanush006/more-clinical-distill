@@ -69,7 +69,6 @@ def train_one_epoch(
                 student_ecg_logits  = ecg_logits,
                 student_pulm_logits = pulm_logits,
                 student_emb         = student_emb,
-                teacher_ecg_logits  = ecg_logits.detach(),  # soft targets from student (no teacher logits cached)
                 teacher_ecg_emb     = t_ecg,
                 teacher_cxr_emb     = t_cxr,
                 teacher_text_emb    = t_text,
@@ -205,40 +204,49 @@ def main():
     lambda_h     = gate_cfg.get("lambda_h", 0.1)
     modalities   = tuple(gate_cfg.get("modalities", ["ecg", "cxr", "text"]))
 
-    triplet_cache = cfg["teacher"].get("triplet_cache")
+    triplet_cache   = cfg["teacher"].get("triplet_cache")
+    signal_cache    = cfg["data"].get("signal_cache")
+    signal_id_cache = cfg["data"].get("signal_id_cache")
 
     # ── Datasets ──────────────────────────────────────────────────────
     train_ds = DistillDataset(
-        data_path      = cfg["data"]["train_npy"],
-        triplet_cache  = triplet_cache,
-        embed_cache    = cfg["teacher"].get("embedding_cache"),
-        study_id_cache = cfg["teacher"].get("study_id_cache"),
-        lead_idx       = cfg["student"].get("input_lead", 0),
-        signal_length  = cfg["student"].get("signal_length", 1000),
-        split          = "train",
+        data_path       = cfg["data"]["train_npy"],
+        triplet_cache   = triplet_cache,
+        embed_cache     = cfg["teacher"].get("embedding_cache"),
+        study_id_cache  = cfg["teacher"].get("study_id_cache"),
+        signal_cache    = signal_cache,
+        signal_id_cache = signal_id_cache,
+        lead_idx        = cfg["student"].get("input_lead", 0),
+        signal_length   = cfg["student"].get("signal_length", 1000),
+        split           = "train",
     )
     val_ds = DistillDataset(
-        data_path      = cfg["data"]["val_npy"],
-        triplet_cache  = triplet_cache,
-        lead_idx       = cfg["student"].get("input_lead", 0),
-        signal_length  = cfg["student"].get("signal_length", 1000),
-        split          = "val",
+        data_path       = cfg["data"]["val_npy"],
+        triplet_cache   = triplet_cache,
+        signal_cache    = signal_cache,
+        signal_id_cache = signal_id_cache,
+        lead_idx        = cfg["student"].get("input_lead", 0),
+        signal_length   = cfg["student"].get("signal_length", 1000),
+        split           = "val",
     )
 
     train_loader = DataLoader(
         train_ds,
-        batch_size  = cfg["training"]["batch_size"],
-        num_workers = cfg["training"]["num_workers"],
-        shuffle     = True,
-        pin_memory  = True,
-        drop_last   = True,
+        batch_size       = cfg["training"]["batch_size"],
+        num_workers      = cfg["training"]["num_workers"],
+        shuffle          = True,
+        pin_memory       = True,
+        drop_last        = True,
+        persistent_workers = cfg["training"]["num_workers"] > 0,
+        prefetch_factor    = 4 if cfg["training"]["num_workers"] > 0 else None,
     )
     val_loader = DataLoader(
         val_ds,
-        batch_size  = cfg["training"]["batch_size"],
-        num_workers = cfg["training"]["num_workers"],
-        shuffle     = False,
-        pin_memory  = True,
+        batch_size       = cfg["training"]["batch_size"],
+        num_workers      = cfg["training"]["num_workers"],
+        shuffle          = False,
+        pin_memory       = True,
+        persistent_workers = cfg["training"]["num_workers"] > 0,
     )
 
     # ── Model + Loss ──────────────────────────────────────────────────

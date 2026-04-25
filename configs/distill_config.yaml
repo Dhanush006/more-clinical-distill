@@ -43,9 +43,14 @@ student:
 
 # ── Data ─────────────────────────────────────────────────────
 data:
-  train_npy: data/processed/more_train.npy
-  val_npy:   data/processed/more_val.npy
-  test_npy:  data/processed/more_test.npy
+  train_npy:        data/processed/more_train.npy
+  val_npy:          data/processed/more_val.npy
+  test_npy:         data/processed/more_test.npy
+  # Pre-computed (N, 1000, 12) float32 cache of all ECG leads at 100 Hz.
+  # Built by scripts/cache_ecg_signals.py — eliminates per-batch wfdb.rdsamp
+  # + scipy.resample overhead during training (~30x epoch speedup).
+  signal_cache:     data/processed/ecg_signals_100hz.npy
+  signal_id_cache:  data/processed/ecg_signal_ids.npy
 
 # ── Loss weights (legacy, used by A0 baseline only) ──────────
 # L = alpha_ecg*L_ecg_task + alpha_pulm*L_pulm_task + gamma*L_align
@@ -57,21 +62,22 @@ loss_weights:
 # ── ResidualLossGate ──────────────────────────────────────────
 loss_gate:
   enabled:    true                      # set false for uniform-weight ablations
-  lambda_h:   0.1                       # entropy regularisation weight
+  lambda_h:   0.3                       # entropy reg weight (was 0.1 — too weak,
+                                        # gate collapsed onto degenerate KL term)
   hidden_dim: 64                        # MLP hidden layer size
   modalities: [ecg, cxr, text]          # which teacher embeddings to use
 
 # ── Training ─────────────────────────────────────────────────
 training:
-  epochs:        100
-  batch_size:    64
-  num_workers:   4
-  learning_rate: 1.0e-4
+  epochs:        50          # was 100; signal cache makes ~50 epochs sufficient
+  batch_size:    256         # was 64; signal cache + persistent_workers fits fine
+  num_workers:   8           # was 4; bumped with bigger batch
+  learning_rate: 3.0e-4      # scaled with batch size (256/64 = 4×, sqrt-rule → ~2×; round to 3e-4)
   weight_decay:  0.01
   t_0:           10
   eta_min:       1.0e-6
-  kl_temperature: 4.0    # temperature for soft label KL loss
-  early_stopping_patience: 15
+  kl_temperature: 4.0    # retained for backward-compat (KL term currently disabled)
+  early_stopping_patience: 10
 
 # ── Outputs ──────────────────────────────────────────────────
 outputs:

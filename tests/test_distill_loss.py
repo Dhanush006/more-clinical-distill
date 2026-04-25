@@ -25,7 +25,7 @@ EMB     = 128
 T_KL    = 4.0
 
 
-def make_loss(enabled=True, lambda_h=0.1, kl_temperature=4.0, modalities=("ecg", "cxr", "text")):
+def make_loss(enabled=True, lambda_h=0.3, kl_temperature=4.0, modalities=("ecg", "cxr", "text")):
     return DistillationLoss(
         gate_enabled   = enabled,
         lambda_h       = lambda_h,
@@ -38,7 +38,6 @@ def make_batch(B=B):
     student_ecg_logits  = torch.randn(B, N_ECG)
     student_pulm_logits = torch.randn(B, N_PULM)
     student_emb         = torch.randn(B, EMB, requires_grad=True)
-    teacher_ecg_logits  = torch.randn(B, N_ECG)
     teacher_ecg_emb     = torch.randn(B, EMB)
     teacher_cxr_emb     = torch.randn(B, EMB)
     teacher_text_emb    = torch.randn(B, EMB)
@@ -48,7 +47,6 @@ def make_batch(B=B):
         student_ecg_logits  = student_ecg_logits,
         student_pulm_logits = student_pulm_logits,
         student_emb         = student_emb,
-        teacher_ecg_logits  = teacher_ecg_logits,
         teacher_ecg_emb     = teacher_ecg_emb,
         teacher_cxr_emb     = teacher_cxr_emb,
         teacher_text_emb    = teacher_text_emb,
@@ -151,18 +149,26 @@ def test_align_text_shape():
     assert L.shape == (B,)
 
 
+# NOTE: The KL term has been removed from DistillationLoss.forward (no cached
+# teacher classification logits → KL was degenerate and the gate collapsed onto
+# it). The kl_loss() static method is retained so existing pipelines that cache
+# teacher logits in the future can re-enable it. Tests below exercise the
+# helper directly with explicit teacher logits.
+
 def test_kl_loss_shape_and_finite():
     dl = make_loss()
-    b  = make_batch()
-    L  = dl.kl_loss(b["student_ecg_logits"], b["teacher_ecg_logits"])
+    student_logits = torch.randn(B, N_ECG)
+    teacher_logits = torch.randn(B, N_ECG)
+    L  = dl.kl_loss(student_logits, teacher_logits)
     assert L.shape == (B,)
     assert torch.isfinite(L).all()
 
 
 def test_kl_loss_nonnegative():
     dl = make_loss()
-    b  = make_batch()
-    L  = dl.kl_loss(b["student_ecg_logits"], b["teacher_ecg_logits"])
+    student_logits = torch.randn(B, N_ECG)
+    teacher_logits = torch.randn(B, N_ECG)
+    L  = dl.kl_loss(student_logits, teacher_logits)
     assert (L >= 0).all(), "KL divergence must be non-negative"
 
 
@@ -178,27 +184,12 @@ def test_kl_uses_temperature():
     """Temperature scaling must produce different outputs at T=1 vs T=10."""
     dl_cold = make_loss(kl_temperature=1.0)
     dl_warm = make_loss(kl_temperature=10.0)
-    b = make_batch()
-    L_cold = dl_cold.kl_loss(b["student_ecg_logits"], b["teacher_ecg_logits"])
-    L_warm = dl_warm.kl_loss(b["student_ecg_logits"], b["teacher_ecg_logits"])
-    # The T² scaling means warm loss is NOT necessarily < cold loss in magnitude.
-    # What we verify: temperature actually changes the computation (losses differ).
+    student_logits = torch.randn(B, N_ECG)
+    teacher_logits = torch.randn(B, N_ECG)
+    L_cold = dl_cold.kl_loss(student_logits, teacher_logits)
+    L_warm = dl_warm.kl_loss(student_logits, teacher_logits)
     assert not torch.allclose(L_cold, L_warm, atol=1e-4), \
-        "T=1 and T=10 should produce different KL values — check temperature is applied"
-
-    # And verify: the softened distributions at high T are indeed more uniform
-    # by checking that the raw (pre-T²) KL is lower at high T.
-    T_cold, T_warm = 1.0, 10.0
-    import torch.nn.functional as F
-    p_teacher_cold = F.softmax(b["teacher_ecg_logits"] / T_cold, dim=-1)
-    p_student_cold = F.log_softmax(b["student_ecg_logits"] / T_cold, dim=-1)
-    p_teacher_warm = F.softmax(b["teacher_ecg_logits"] / T_warm, dim=-1)
-    p_student_warm = F.log_softmax(b["student_ecg_logits"] / T_warm, dim=-1)
-
-    raw_kl_cold = F.kl_div(p_student_cold, p_teacher_cold, reduction="batchmean")
-    raw_kl_warm = F.kl_div(p_student_warm, p_teacher_warm, reduction="batchmean")
-    assert raw_kl_warm < raw_kl_cold, \
-        "Raw KL (no T² scaling) must decrease with higher temperature (softer distributions)"
+        "T=1 and T=10 should produce different KL values"
 
 
 # ── Gated total loss tests ───────────────────────────────────────────
@@ -206,20 +197,18 @@ def test_kl_uses_temperature():
 def test_forward_returns_scalar():
     dl = make_loss()
     b  = make_batch()
-    result = dl(
-        student_ecg_logits  = b["student_ecg_logits"],
-        student_pulm_logits = b["student_pulm_logits"],
-        student_emb         = b["student_emb"],
-        teacher_ecg_logits  = b["teacher_ecg_logits"],
-        teacher_ecg_emb     = b["teacher_ecg_emb"],
-        teacher_cxr_emb     = b["teacher_cxr_emb"],
-        teacher_text_emb    = b["teacher_text_emb"],
-        ecg_labels          = b["ecg_labels"],
-        pulm_labels         = b["pulm_labels"],
-    )
+    result = dl(**b)
     loss = result["loss"]
     assert loss.ndim == 0, f"Total loss must be scalar, got shape {loss.shape}"
     assert torch.isfinite(loss), "Total loss must be finite"
+
+
+def test_forward_kl_key_is_zero():
+    """L_kl is removed but key retained for log compatibility — must be 0."""
+    dl = make_loss()
+    b  = make_batch()
+    result = dl(**b)
+    assert result["L_kl"] == 0.0, "KL term should be 0 (removed from loss)"
 
 
 def test_forward_loss_nonnegative():
