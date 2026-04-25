@@ -19,6 +19,7 @@ mkdir -p logs/ablations
 
 declare -A ABLATIONS=(
     [A0_baseline]="configs/ablations/A0_baseline.yaml"
+    [A0_efficientnet]="configs/ablations/A0_efficientnet.yaml"
     [A1_uniform]="configs/ablations/A1_uniform.yaml"
     [A2_lossgate]="configs/ablations/A2_lossgate.yaml"
     [A3_ecgonly]="configs/ablations/A3_ecgonly.yaml"

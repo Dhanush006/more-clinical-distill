@@ -22,15 +22,17 @@ from pathlib import Path
 import torch
 
 
-ABLATION_NAMES = ["A0_baseline", "A1_uniform", "A2_lossgate", "A3_ecgonly", "B1_lead2", "B2_v2"]
+ABLATION_NAMES = ["A0_baseline", "A0_efficientnet", "A1_uniform", "A2_lossgate",
+                  "A3_ecgonly", "B1_lead2", "B2_v2"]
 
 ABLATION_DESCRIPTIONS = {
-    "A0_baseline": "Static weights (1.0/0.5/0.5), ECG-only, Lead I",
-    "A1_uniform":  "Uniform 1/6 weights, all modalities, Lead I",
-    "A2_lossgate": "ResidualLossGate, all modalities, Lead I [PRIMARY]",
-    "A3_ecgonly":  "ResidualLossGate, ECG-only alignment, Lead I",
-    "B1_lead2":    "ResidualLossGate, all modalities, Lead II",
-    "B2_v2":       "ResidualLossGate, all modalities, V2",
+    "A0_baseline":     "MobileNetV3-Small, static weights, ECG-only align, Lead I",
+    "A0_efficientnet": "EfficientNet-B0, static weights, ECG-only align, Lead I",
+    "A1_uniform":      "MobileNetV3-Small, uniform 1/n weights, all modalities, Lead I",
+    "A2_lossgate":     "MobileNetV3-Small, ResidualLossGate, all modalities, Lead I",
+    "A3_ecgonly":      "MobileNetV3-Small, ResidualLossGate, ECG-only align, Lead I",
+    "B1_lead2":        "MobileNetV3-Small, ResidualLossGate, all modalities, Lead II",
+    "B2_v2":           "MobileNetV3-Small, ResidualLossGate, all modalities, V2",
 }
 
 
@@ -48,7 +50,7 @@ def best_checkpoint(run_dir: Path):
         return None
     # Return the one with highest ecgauc in filename
     def auc_from_name(p):
-        m = re.search(r"ecgauc([\d.]+)", p.name)
+        m = re.search(r"ecgauc(\d+\.\d+)", p.name)
         return float(m.group(1)) if m else 0.0
     return max(ckpts, key=auc_from_name)
 

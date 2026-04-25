@@ -1,0 +1,19 @@
+# A0_efficientnet — A0 baseline (static weights, ECG-only) but with EfficientNet-B0 backbone
+# Same training recipe as A0_baseline, only the student backbone changes.
+# Tests whether a wider/deeper backbone improves over MobileNetV3-Small.
+
+_extends: configs/distill_config.yaml
+
+outputs:
+  checkpoint_dir: outputs/ablations/A0_efficientnet
+  log_dir:        logs/ablations/A0_efficientnet
+
+loss_gate:
+  enabled:    false
+  lambda_h:   0.0
+  hidden_dim: 64
+  modalities: [ecg]
+
+student:
+  backbone:   efficientnet_b0   # ~4.37M params, vs mobilenetv3_small_100 ~1.82M
+  input_lead: 0                 # Lead I

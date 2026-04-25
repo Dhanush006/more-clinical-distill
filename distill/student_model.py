@@ -42,13 +42,13 @@ class SingleLeadECGStudent(nn.Module):
         embedding_dim: int = 128,
         signal_length: int = 1000,
         pretrained: bool = False,
+        backbone_name: str = "mobilenetv3_small_100",
     ):
         super().__init__()
         self.signal_length = signal_length
+        self.backbone_name = backbone_name
 
         # ── 1-D → 3-channel adapter ───────────────────────────────────
-        # Input:  (B, 1, T)
-        # Output: (B, 3, T)
         self.channel_adapter = nn.Sequential(
             nn.Conv1d(1, 16, kernel_size=7, padding=3, bias=False),
             nn.BatchNorm1d(16),
@@ -56,13 +56,11 @@ class SingleLeadECGStudent(nn.Module):
             nn.Conv1d(16, 3, kernel_size=1, bias=False),
         )
 
-        # ── MobileNetV3-Small backbone (2-D, adapted for 1×T input) ──
-        # We reshape (B, 3, T) → (B, 3, 1, T) so standard 2-D convs work.
-        # timm's mobilenetv3_small_100 expects (B, 3, H, W).
+        # ── 2-D backbone (timm: mobilenetv3_small_100 / efficientnet_b0 / resnet18 / etc.)
         self.backbone = timm.create_model(
-            "mobilenetv3_small_100",
+            backbone_name,
             pretrained=pretrained,
-            num_classes=0,          # remove classifier head
+            num_classes=0,
             global_pool="avg",
         )
         # Detect actual output dim via a dummy forward (timm reports 576 via
@@ -122,4 +120,5 @@ def build_student(cfg: dict) -> SingleLeadECGStudent:
         embedding_dim=cfg.get("embedding_dim", 128),
         signal_length=cfg.get("signal_length", 1000),
         pretrained=cfg.get("pretrained_backbone", False),
+        backbone_name=cfg.get("backbone", "mobilenetv3_small_100"),
     )
