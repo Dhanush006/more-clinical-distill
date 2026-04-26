@@ -2,13 +2,15 @@
 
 Distil a 280M-parameter multimodal teacher (**MoRE**: ECG + Chest X-Ray + Text) into a 1.82M-parameter single-lead **ECG student** that is small and fast enough to run on a smartwatch. Trained on MIMIC-IV-ECG + MIMIC-CXR-JPG (49,076 paired records) on the Texas A&M Grace cluster.
 
+**Primary results — patient-stratified 80/10/10 split (val / test n = 4 908 each):**
+
 | Backbone | Params | .pth size | CPU latency (1 ECG) | Test ECG AUROC | Test ECG AUPRC |
 |---|---:|---:|---:|---:|---:|
-| MobileNetV3-Small | 1.82 M | 7.07 MB | **4.31 ms** | 0.7320 | 0.3057 |
-| EfficientNet-B0   | 4.37 M | 16.97 MB | 9.67 ms | **0.7421** | **0.3887** |
-| Prior baseline (28 k records) | 1.82 M | 7.07 MB | n/a | 0.7043 (val) | n/a |
+| MobileNetV3-Small | 1.82 M | 7.07 MB | **4.44 ms** | 0.7623 | 0.2692 |
+| **EfficientNet-B0** | 4.37 M | 16.97 MB | 10.01 ms | **0.7955** | **0.3457** |
+| Prior baseline (28 k records, legacy split) | 1.82 M | 7.07 MB | n/a | 0.7043 (val) | n/a |
 
-> **Headline:** Pre-caching the ECG signal array + scaling batch size + tuning LR delivered a **+10 pt AUROC swing** vs the prior 28 k-record baseline. A learned ResidualLossGate over five distillation losses was tested and **does not help** (see `docs/team_report.md` §6).
+> **Headline:** A patient-stratified 80/10/10 split (zero subject overlap, per-class proportions within 0.1 pt across splits) gives an honest read on rare-class generalisation. EfficientNet-B0 wins decisively (test AUROC 0.7955, AUPRC 0.3457 → +28 % over MobileNet). A learned ResidualLossGate over five distillation losses **hurts by 10.7 pts** AUROC vs static weighting and is dropped in the deployment recipe (see `docs/team_report.md` §6). Legacy CXR-derived split numbers are kept as a parallel study in Appendix D.
 
 ---
 
