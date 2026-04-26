@@ -109,17 +109,32 @@ def train_one_epoch(
 
 
 def compute_auc(logits_list, labels_list, label_name: str) -> tuple[float, np.ndarray]:
+    """Compute per-class AUROC, robust to (a) NaN logits from a few rare-batch
+    BF16/BN interactions and (b) degenerate per-class label distributions."""
     from sklearn.metrics import roc_auc_score
     probs = torch.sigmoid(torch.cat(logits_list)).numpy()
     labs  = torch.cat(labels_list).clamp(min=0.0).numpy()
-    try:
-        per_class = roc_auc_score(labs, probs, average=None)
-        macro     = float(np.mean(per_class))
-    except Exception as e:
-        print(f"  [{label_name}] AUC error: {e}")
-        n = probs.shape[1]
-        per_class = np.full(n, float("nan"))
-        macro = float("nan")
+
+    # Sanitize NaN/Inf in probs (rare BF16 leakage); replace with 0.5 so the
+    # affected sample has neutral rank rather than poisoning the column.
+    bad = ~np.isfinite(probs)
+    if bad.any():
+        n_bad = int(bad.sum())
+        print(f"  [{label_name}] WARN: {n_bad} non-finite probs sanitized to 0.5")
+        probs = np.where(bad, 0.5, probs)
+
+    n_classes = probs.shape[1]
+    per_class = np.full(n_classes, float("nan"))
+    for c in range(n_classes):
+        y_t = labs[:, c]
+        if y_t.sum() in (0, len(y_t)):
+            continue  # degenerate; AUC undefined
+        try:
+            per_class[c] = float(roc_auc_score(y_t, probs[:, c]))
+        except Exception as e:
+            print(f"  [{label_name}/{c}] AUC error: {e}")
+
+    macro = float(np.nanmean(per_class)) if np.any(np.isfinite(per_class)) else float("nan")
     return macro, per_class
 
 
@@ -133,10 +148,12 @@ def validate(student, loader, device, ecg_class_names, pulm_class_names):
             ecg         = ecg.to(device)
             ecg_labels  = ecg_labels.to(device)
             pulm_labels = pulm_labels.to(device)
+            # No autocast in eval: BF16 + BatchNorm running stats can leak NaN
+            # into a small subset of logits, poisoning per-class AUC.
             ecg_logits, pulm_logits, _ = student(ecg)
-            ecg_logits_all.append(ecg_logits.cpu())
+            ecg_logits_all.append(ecg_logits.float().cpu())
             ecg_labels_all.append(ecg_labels.cpu())
-            pulm_logits_all.append(pulm_logits.cpu())
+            pulm_logits_all.append(pulm_logits.float().cpu())
             pulm_labels_all.append(pulm_labels.cpu())
 
     ecg_macro,  ecg_per  = compute_auc(ecg_logits_all,  ecg_labels_all,  "ECG")
