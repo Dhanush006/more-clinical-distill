@@ -92,12 +92,22 @@ class DistillDataset(Dataset):
                           f"— replacing with zeros.")
                 return np.nan_to_num(arr.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
 
-            self.ecg_embs  = _clean(npz[f"{split_key}_ecg"])
-            self.cxr_embs  = _clean(npz[f"{split_key}_cxr"])
-            self.text_embs = _clean(npz[f"{split_key}_text"])
-
-            ids = npz[f"{split_key}_ids"]
-            self.emb_lookup = {str(sid): i for i, sid in enumerate(ids)}
+            # Build a GLOBAL lookup that spans all three npz partitions
+            # (train+val+test). The npz was originally partitioned per the
+            # legacy CXR-derived split, but the underlying embeddings cover
+            # the full 49,076-record cohort. Supporting any external split
+            # (e.g. patient-stratified 80/10/10) requires a global lookup.
+            ecg_blocks, cxr_blocks, text_blocks, id_blocks = [], [], [], []
+            for part in ("train", "val", "test"):
+                ecg_blocks.append(_clean(npz[f"{part}_ecg"]))
+                cxr_blocks.append(_clean(npz[f"{part}_cxr"]))
+                text_blocks.append(_clean(npz[f"{part}_text"]))
+                id_blocks.append(npz[f"{part}_ids"])
+            self.ecg_embs  = np.concatenate(ecg_blocks,  axis=0)
+            self.cxr_embs  = np.concatenate(cxr_blocks,  axis=0)
+            self.text_embs = np.concatenate(text_blocks, axis=0)
+            ids_all = np.concatenate(id_blocks, axis=0)
+            self.emb_lookup = {str(sid): i for i, sid in enumerate(ids_all)}
 
         elif embed_cache is not None and os.path.exists(embed_cache):
             # Legacy: ECG-only embeddings (for backwards compatibility)
