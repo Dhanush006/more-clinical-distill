@@ -42,10 +42,15 @@ student:
     - Pleural Effusion
 
 # ── Data ─────────────────────────────────────────────────────
+# Default = patient-stratified 80/10/10 multi-label split built by
+# scripts/stratified_split.py (39,260 / 4,908 / 4,908 rows, zero subject
+# overlap, per-class proportions within 0.1 pt across splits).
+# Legacy MIMIC-CXR-derived split (48,423/379/274) is preserved as
+# more_{train,val,test}.npy and used only for the legacy appendix.
 data:
-  train_npy:        data/processed/more_train.npy
-  val_npy:          data/processed/more_val.npy
-  test_npy:         data/processed/more_test.npy
+  train_npy:        data/processed/more_strat_train.npy
+  val_npy:          data/processed/more_strat_val.npy
+  test_npy:         data/processed/more_strat_test.npy
   # Pre-computed (N, 1000, 12) float32 cache of all ECG leads at 100 Hz.
   # Built by scripts/cache_ecg_signals.py — eliminates per-batch wfdb.rdsamp
   # + scipy.resample overhead during training (~30x epoch speedup).

@@ -5,8 +5,8 @@
 _extends: configs/distill_config.yaml
 
 outputs:
-  checkpoint_dir: outputs/ablations/A1_uniform
-  log_dir:        logs/ablations/A1_uniform
+  checkpoint_dir: outputs/ablations/A1_uniform_strat
+  log_dir:        logs/ablations/A1_uniform_strat
 
 loss_gate:
   enabled:    false      # uniform 1/n weights (gate disabled → no MLP parameters)

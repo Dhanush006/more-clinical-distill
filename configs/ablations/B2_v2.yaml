@@ -5,8 +5,8 @@
 _extends: configs/distill_config.yaml
 
 outputs:
-  checkpoint_dir: outputs/ablations/B2_v2
-  log_dir:        logs/ablations/B2_v2
+  checkpoint_dir: outputs/ablations/B2_v2_strat
+  log_dir:        logs/ablations/B2_v2_strat
 
 loss_gate:
   enabled:    true

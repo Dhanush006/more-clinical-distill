@@ -22,17 +22,30 @@ from pathlib import Path
 import torch
 
 
-ABLATION_NAMES = ["A0_baseline", "A0_efficientnet", "A1_uniform", "A2_lossgate",
-                  "A3_ecgonly", "B1_lead2", "B2_v2"]
+ABLATION_NAMES = [
+    # Primary: patient-stratified 80/10/10 split (39,260 / 4,908 / 4,908)
+    "A0_baseline_strat", "A0_efficientnet_strat", "A1_uniform_strat",
+    "A2_lossgate_strat", "A3_ecgonly_strat", "B1_lead2_strat", "B2_v2_strat",
+    # Legacy: MIMIC-CXR-derived split (48,423 / 379 / 274) — appendix only
+    "A0_baseline", "A0_efficientnet", "A1_uniform", "A2_lossgate",
+    "A3_ecgonly", "B1_lead2", "B2_v2",
+]
 
 ABLATION_DESCRIPTIONS = {
-    "A0_baseline":     "MobileNetV3-Small, static weights, ECG-only align, Lead I",
-    "A0_efficientnet": "EfficientNet-B0, static weights, ECG-only align, Lead I",
-    "A1_uniform":      "MobileNetV3-Small, uniform 1/n weights, all modalities, Lead I",
-    "A2_lossgate":     "MobileNetV3-Small, ResidualLossGate, all modalities, Lead I",
-    "A3_ecgonly":      "MobileNetV3-Small, ResidualLossGate, ECG-only align, Lead I",
-    "B1_lead2":        "MobileNetV3-Small, ResidualLossGate, all modalities, Lead II",
-    "B2_v2":           "MobileNetV3-Small, ResidualLossGate, all modalities, V2",
+    "A0_baseline_strat":     "[STRAT] MobileNetV3-Small, static weights, ECG-only, Lead I",
+    "A0_efficientnet_strat": "[STRAT] EfficientNet-B0, static weights, ECG-only, Lead I",
+    "A1_uniform_strat":      "[STRAT] MobileNetV3-Small, uniform 1/n, all mods, Lead I",
+    "A2_lossgate_strat":     "[STRAT] MobileNetV3-Small, ResidualLossGate, all mods, Lead I",
+    "A3_ecgonly_strat":      "[STRAT] MobileNetV3-Small, ResidualLossGate, ECG-only, Lead I",
+    "B1_lead2_strat":        "[STRAT] MobileNetV3-Small, ResidualLossGate, all mods, Lead II",
+    "B2_v2_strat":           "[STRAT] MobileNetV3-Small, ResidualLossGate, all mods, V2",
+    "A0_baseline":     "[LEGACY] MobileNetV3-Small, static, ECG-only, Lead I",
+    "A0_efficientnet": "[LEGACY] EfficientNet-B0, static, ECG-only, Lead I",
+    "A1_uniform":      "[LEGACY] MobileNetV3-Small, uniform 1/n, all mods, Lead I",
+    "A2_lossgate":     "[LEGACY] MobileNetV3-Small, ResidualLossGate, all mods, Lead I",
+    "A3_ecgonly":      "[LEGACY] MobileNetV3-Small, ResidualLossGate, ECG-only, Lead I",
+    "B1_lead2":        "[LEGACY] MobileNetV3-Small, ResidualLossGate, all mods, Lead II",
+    "B2_v2":           "[LEGACY] MobileNetV3-Small, ResidualLossGate, all mods, V2",
 }
 
 

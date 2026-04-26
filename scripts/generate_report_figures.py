@@ -34,13 +34,13 @@ OUT    = REPO / "figures"
 OUT.mkdir(parents=True, exist_ok=True)
 
 RUNS = [
-    ("A0_baseline",     "MobileNetV3-S - static, ECG-only, Lead I"),
-    ("A0_efficientnet", "EfficientNet-B0 - static, ECG-only, Lead I"),
-    ("A1_uniform",      "MobileNetV3-S - uniform 1/5, all mods, Lead I"),
-    ("A2_lossgate",     "MobileNetV3-S - learned gate, all mods, Lead I"),
-    ("A3_ecgonly",      "MobileNetV3-S - learned gate, ECG-only, Lead I"),
-    ("B1_lead2",        "MobileNetV3-S - learned gate, all mods, Lead II"),
-    ("B2_v2",           "MobileNetV3-S - learned gate, all mods, V2"),
+    ("A0_baseline_strat",     "MobileNetV3-S - static, ECG-only, Lead I"),
+    ("A0_efficientnet_strat", "EfficientNet-B0 - static, ECG-only, Lead I"),
+    ("A1_uniform_strat",      "MobileNetV3-S - uniform 1/5, all mods, Lead I"),
+    ("A2_lossgate_strat",     "MobileNetV3-S - learned gate, all mods, Lead I"),
+    ("A3_ecgonly_strat",      "MobileNetV3-S - learned gate, ECG-only, Lead I"),
+    ("B1_lead2_strat",        "MobileNetV3-S - learned gate, all mods, Lead II"),
+    ("B2_v2_strat",           "MobileNetV3-S - learned gate, all mods, V2"),
 ]
 
 EPOCH_RE = re.compile(
