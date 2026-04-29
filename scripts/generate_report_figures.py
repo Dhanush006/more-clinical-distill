@@ -2,10 +2,11 @@
 scripts/generate_report_figures.py
 
 Build the report figures from training logs + collected ablation results:
-  figures/Fig4_Ablation_AUROC.png  - grouped horizontal bar chart of ECG/Pulm AUROC
-  figures/Fig5_Training_Curves.png - val AUROC vs epoch overlay for all 7 runs
-  figures/Fig6_PerClass_AUROC.png  - per-class AUROC heat strip for A0_baseline
-  figures/Fig7_Latency_vs_AUROC.png - tradeoff plot (CPU latency vs AUROC)
+  figures/Fig4_Ablation_AUROC.png         - grouped horizontal bar chart of ECG/Pulm AUROC
+  figures/Fig5_Training_Curves.png        - val AUROC vs epoch overlay for all 7 runs
+  figures/Fig6_PerClass_AUROC.png         - per-class AUROC strip for A0_baseline (strat)
+  figures/Fig6b_PerClass_AUROC_B0.png     - per-class AUROC strip for A0_efficientnet (strat)
+  figures/Fig7_Latency_vs_AUROC.png       - tradeoff plot (CPU latency vs AUROC)
 
 Usage:
     cd /scratch/user/dshekar/more-clinical-distill
@@ -49,7 +50,9 @@ EPOCH_RE = re.compile(
 
 
 def parse_log(run_name):
-    pattern = LOGDIR / f"{run_name}_*.log"
+    # Log files are named without the _strat suffix (e.g. A0_baseline_18447854.log)
+    log_prefix = run_name.replace("_strat", "")
+    pattern = LOGDIR / f"{log_prefix}_*.log"
     logs = sorted(pattern.parent.glob(pattern.name))
     if not logs:
         return None
@@ -110,7 +113,7 @@ def fig_ablation_bar():
     ax.set_xlim(0.40, 0.92)
     ax.set_xlabel("Macro AUROC")
     ax.set_title("Single-Lead ECG Student - Ablation Sweep\n"
-                 "Val (n=379) and Test (n=274), best epoch via early stopping",
+                 "Patient-stratified split: Val (n=4,908) and Test (n=4,908), best epoch via early stopping",
                  fontsize=11)
     ax.legend(loc="lower right", framealpha=0.95, fontsize=9)
     fig.tight_layout()
@@ -162,11 +165,11 @@ def fig_training_curves():
     print("wrote", out)
 
 
-# ---------- Fig6: per-class AUROC strip (A0_baseline) ----------
-def fig_per_class():
-    ev = load_eval_json("A0_baseline")
+# ---------- shared helper: per-class AUROC strip ----------
+def _per_class_plot(run_name, title, out_path):
+    ev = load_eval_json(run_name)
     if ev is None:
-        print("skip Fig6: A0_baseline metrics JSON not found")
+        print(f"skip {out_path.name}: {run_name} metrics JSON not found")
         return
     classes = [c["class"] for c in ev["ecg"]["per_class"]] + \
               [c["class"] for c in ev["pulm"]["per_class"]]
@@ -179,7 +182,7 @@ def fig_per_class():
 
     n = len(classes)
     y = np.arange(n)
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(11, 6.5))
     colours = ["#2ca02c" if v >= 0.80 else ("#ff7f0e" if v >= 0.70 else "#d62728")
                for v in aurocs]
     ax.barh(y, aurocs, color=colours, alpha=0.85, edgecolor="black", linewidth=0.5)
@@ -191,21 +194,38 @@ def fig_per_class():
                 va="center", fontsize=8, color="#1f77b4")
 
     ax.axhline(9.5, color="black", linewidth=0.8)
-    ax.text(0.02, 4.5,  "ECG rhythm",      rotation=90, va="center", fontsize=10, color="grey")
-    ax.text(0.02, 11.5, "Pulm (CXR)",      rotation=90, va="center", fontsize=10, color="grey")
+    ax.text(0.02, 4.5,  "ECG rhythm", rotation=90, va="center", fontsize=10, color="grey")
+    ax.text(0.02, 11.5, "Pulm (CXR)", rotation=90, va="center", fontsize=10, color="grey")
     ax.set_yticks(y, classes)
     ax.invert_yaxis()
-    ax.set_xlim(0.0, 1.05)
+    ax.set_xlim(0.0, 1.10)
     ax.set_xlabel("AUROC (bar) and AUPRC (diamond)")
-    ax.set_title("Per-Class Performance - A0_baseline (MobileNetV3-Small) on Test (n=274)\n"
-                 "Green AUROC>=0.80 | Orange 0.70-0.80 | Red <0.70",
-                 fontsize=11)
+    ax.set_title(title, fontsize=11)
     ax.legend(loc="lower right")
     fig.tight_layout()
-    out = OUT / "Fig6_PerClass_AUROC.png"
-    fig.savefig(out, dpi=180, bbox_inches="tight")
+    fig.savefig(out_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
-    print("wrote", out)
+    print("wrote", out_path)
+
+
+# ---------- Fig6: per-class AUROC strip (A0_baseline, stratified) ----------
+def fig_per_class():
+    _per_class_plot(
+        "A0_baseline_strat",
+        "Per-Class Performance — A0_baseline (MobileNetV3-Small), Stratified Test (n=4,908)\n"
+        "Green AUROC≥0.80 | Orange 0.70–0.80 | Red <0.70",
+        OUT / "Fig6_PerClass_AUROC.png",
+    )
+
+
+# ---------- Fig6b: per-class AUROC strip (A0_efficientnet, stratified) ----------
+def fig_per_class_efficientnet():
+    _per_class_plot(
+        "A0_efficientnet_strat",
+        "Per-Class Performance — A0_efficientnet (EfficientNet-B0), Stratified Test (n=4,908)\n"
+        "Green AUROC≥0.80 | Orange 0.70–0.80 | Red <0.70",
+        OUT / "Fig6b_PerClass_AUROC_B0.png",
+    )
 
 
 # ---------- Fig7: latency vs AUROC tradeoff ----------
@@ -258,5 +278,6 @@ if __name__ == "__main__":
     fig_ablation_bar()
     fig_training_curves()
     fig_per_class()
+    fig_per_class_efficientnet()
     fig_latency_tradeoff()
     print("All figures in", OUT)
