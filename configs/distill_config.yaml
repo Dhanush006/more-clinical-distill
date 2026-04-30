@@ -14,6 +14,8 @@ teacher:
   # Legacy ECG-only embeddings (fallback when triplet_cache absent)
   embedding_cache:  data/processed/teacher_ecg_embeddings.npy
   study_id_cache:   data/processed/teacher_ecg_study_ids.npy
+  # Frozen LR probe weights for KL term: fit by scripts/cache_teacher_probe_logits.py
+  probe_weights:    data/processed/teacher_probe_weights.npz
 
 # ── Student ───────────────────────────────────────────────────
 student:
@@ -71,6 +73,7 @@ loss_gate:
                                         # gate collapsed onto degenerate KL term)
   hidden_dim: 64                        # MLP hidden layer size
   modalities: [ecg, cxr, text]          # which teacher embeddings to use
+  use_kl:     false                     # add KL(teacher_probe ‖ student) as 6th term
 
 # ── Training ─────────────────────────────────────────────────
 training:

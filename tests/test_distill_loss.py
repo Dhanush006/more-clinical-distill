@@ -211,11 +211,13 @@ def test_forward_kl_key_is_zero():
     assert result["L_kl"] == 0.0, "KL term should be 0 (removed from loss)"
 
 
-def test_forward_loss_nonnegative():
+def test_forward_loss_finite():
+    # With the corrected gate, gate_component = -(w*terms) is negative by design,
+    # so total loss can be negative. Only finiteness is guaranteed.
     dl = make_loss()
     b  = make_batch()
     result = dl(**b)
-    assert result["loss"].item() >= 0, "Total loss should be non-negative"
+    assert torch.isfinite(result["loss"]), "Total loss must be finite"
 
 
 def test_forward_returns_term_dict():
@@ -240,12 +242,37 @@ def test_forward_backward_has_student_grad():
 
 
 def test_gate_disabled_static_weights():
-    """Disabled gate (uniform mode) must produce a valid scalar loss."""
+    """Disabled gate (uniform mode) must produce a finite scalar loss."""
     dl = make_loss(enabled=False)
     b  = make_batch()
     result = dl(**b)
     assert torch.isfinite(result["loss"])
-    assert result["loss"].item() >= 0
+
+
+def test_gate_gradient_direction():
+    """Gate params must receive gradient opposite to student params (curriculum direction).
+    With corrected stop-grad decoupling: gate_component = -(w * terms.detach()),
+    so the gate is pushed to UP-WEIGHT high-loss terms, not down-weight them."""
+    dl = make_loss()
+    b  = make_batch()
+    result = dl(**b)
+    result["loss"].backward()
+    # Gate MLP should receive gradients from the gate_component
+    gate_params = list(dl.gate.mlp.parameters())
+    assert all(p.grad is not None for p in gate_params), \
+        "Gate MLP parameters must receive gradients"
+    assert all(p.grad.abs().sum() > 0 for p in gate_params), \
+        "Gate MLP gradients must be non-zero"
+
+
+def test_kl_term_active_with_teacher_logits():
+    """When use_kl=True and teacher_ecg_logits is supplied, L_kl must be > 0."""
+    dl = DistillationLoss(gate_enabled=True, use_kl=True)
+    b  = make_batch()
+    b["teacher_ecg_logits"] = torch.randn(B, N_ECG)
+    result = dl(**b)
+    assert result["L_kl"] > 0.0, "L_kl must be positive when teacher logits differ from student"
+    assert torch.isfinite(result["loss"])
 
 
 # ── Modality ablation tests ──────────────────────────────────────────

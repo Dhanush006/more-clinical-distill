@@ -1,0 +1,28 @@
+# A4 — corrected gate direction + KL
+# ResidualLossGate with correct curriculum gradient: gate maximises weighted loss
+# (focuses on hard terms) rather than minimising it. KL(teacher_probe || student)
+# added as 6th loss term. All modalities, Lead I.
+#
+# Key changes vs A2_lossgate_strat:
+#   - gate gradient direction fixed (stop-grad decoupling in distill_loss.py)
+#   - KL term reinstated via frozen LR probe on teacher ECG embeddings
+#   - 6 loss terms (was 5)
+#
+# Prerequisite: run scripts/cache_teacher_probe_logits.py to generate
+#   data/processed/teacher_probe_weights.npz before submitting this job.
+
+_extends: configs/distill_config.yaml
+
+outputs:
+  checkpoint_dir: outputs/ablations/A4_correctgate_strat
+  log_dir:        logs/ablations/A4_correctgate_strat
+
+loss_gate:
+  enabled:    true
+  lambda_h:   0.3
+  hidden_dim: 64
+  modalities: [ecg, cxr, text]
+  use_kl:     true
+
+student:
+  input_lead: 0   # Lead I

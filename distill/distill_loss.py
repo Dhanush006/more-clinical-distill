@@ -1,29 +1,28 @@
 """
 distill/distill_loss.py
 
-DistillationLoss — 5-term per-sample loss with optional ResidualLossGate weighting.
+DistillationLoss — per-sample loss with optional ResidualLossGate weighting.
 
 Loss terms (all reduction='none' → shape (B,)):
     0  L_ecg_BCE    BCE on ECG rhythm logits vs labels
     1  L_pulm_BCE   BCE on pulmonary logits vs labels (-1 uncertain masked out)
     2  L_align_ecg  1 - cosine_sim(student, teacher_ecg)
-    3  L_align_cxr  1 - cosine_sim(student, teacher_cxr)
-    4  L_align_text 1 - cosine_sim(student, teacher_text)
+    3  L_align_cxr  1 - cosine_sim(student, teacher_cxr)       [full-modal only]
+    4  L_align_text 1 - cosine_sim(student, teacher_text)      [full-modal only]
+    5  L_kl         KL(teacher_probe_logits ‖ student_logits)  [when use_kl=True]
 
-Total loss:
-    For each sample i:
-        L_total[i] = Σ_k  w[i,k] × term_k[i]
-    Scalar: mean(L_total) − λ_H × H(w)
+Total loss (corrected gate gradient direction):
+    student_component  = mean( w.detach() × terms )   ← student sees fixed routing
+    gate_component     = mean( −w × terms.detach() )  ← gate maximises weighted loss
+    entropy_reg        = −λ_H × H(w)                  ← prevents gate collapse
+    total = student_component + gate_component + entropy_reg
 
 When gate_enabled=False the gate returns uniform 1/n weights.
-When modalities=("ecg",) align_cxr and align_text are skipped (gate uses 3 terms).
+When modalities=("ecg",) align_cxr and align_text are skipped.
 
-NOTE: A KL distillation term was originally planned but dropped — the teacher
-classification logits are not cached in the pipeline (only embeddings are), so
-the KL term would have been KL(student ‖ student.detach()) ≈ 0. The gate
-rationally collapsed onto that zero-loss term and starved the supervised
-signal (epoch 1 ECG AUC = 0.52 ≈ chance). Re-add only if teacher classification
-logits are cached.
+KL term: supply teacher_ecg_logits (computed from a probe on teacher embeddings)
+to activate. The probe is a frozen logistic-regression head fit on teacher
+embeddings + ECG labels (see scripts/cache_teacher_probe_logits.py).
 """
 
 from __future__ import annotations
@@ -34,42 +33,51 @@ import torch.nn.functional as F
 
 from loss_gate import ResidualLossGate
 
-_IDX = {"ecg": 0, "pulm": 1, "align_ecg": 2, "align_cxr": 3, "align_text": 4}
-_N_TERMS_FULL = 5
-_N_TERMS_ECG_ONLY = 3   # ecg, pulm, align_ecg (no cxr/text)
+_N_TERMS_FULL     = 5   # ecg, pulm, align_ecg, align_cxr, align_text
+_N_TERMS_ECG_ONLY = 3   # ecg, pulm, align_ecg
+_N_TERMS_FULL_KL     = 6   # + kl
+_N_TERMS_ECG_ONLY_KL = 4   # + kl
 
 
 class DistillationLoss(nn.Module):
     """
     Args:
         gate_enabled:    use ResidualLossGate (True) or uniform weights (False)
-        lambda_h:        entropy regularisation weight (default 0.1)
+        lambda_h:        entropy regularisation weight (default 0.3)
         kl_temperature:  temperature for soft-label KL distillation (default 4.0)
         modalities:      tuple of modalities to align against; subset of
                          ("ecg", "cxr", "text"). Must include "ecg".
         embedding_dim:   teacher/student embedding dim (default 128)
         gate_hidden_dim: ResidualLossGate hidden layer size (default 64)
+        use_kl:          include KL(teacher_probe ‖ student) as an additional
+                         loss term. Requires teacher_ecg_logits in forward().
     """
 
     def __init__(
         self,
         gate_enabled:    bool  = True,
         lambda_h:        float = 0.3,
-        kl_temperature:  float = 4.0,    # retained for backward-compat with kl_loss helper
+        kl_temperature:  float = 4.0,
         modalities:      tuple = ("ecg", "cxr", "text"),
         embedding_dim:   int   = 128,
         gate_hidden_dim: int   = 64,
+        use_kl:          bool  = False,
     ):
         super().__init__()
         assert "ecg" in modalities, "modalities must include 'ecg'"
         self.lambda_h       = lambda_h
         self.kl_temperature = kl_temperature
         self.modalities     = tuple(modalities)
+        self.use_kl         = use_kl
 
         # Determine number of active terms
         self.use_cxr  = "cxr"  in modalities
         self.use_text = "text" in modalities
-        self.n_terms  = _N_TERMS_FULL if (self.use_cxr and self.use_text) else _N_TERMS_ECG_ONLY
+        full_modal = self.use_cxr and self.use_text
+        if use_kl:
+            self.n_terms = _N_TERMS_FULL_KL if full_modal else _N_TERMS_ECG_ONLY_KL
+        else:
+            self.n_terms = _N_TERMS_FULL if full_modal else _N_TERMS_ECG_ONLY
 
         self.gate = ResidualLossGate(
             embedding_dim = embedding_dim,
@@ -135,13 +143,12 @@ class DistillationLoss(nn.Module):
         teacher_text_emb:    torch.Tensor,          # (B, 128)
         ecg_labels:          torch.Tensor,          # (B, 10)
         pulm_labels:         torch.Tensor,          # (B, 4)
-        teacher_ecg_logits:  torch.Tensor | None = None,  # accepted for back-compat, unused
+        teacher_ecg_logits:  torch.Tensor | None = None,  # (B, 10) probe logits for KL
     ) -> dict:
         """
         Returns:
             dict with keys: loss (scalar), L_ecg, L_pulm, L_align_ecg,
                             L_align_cxr, L_align_text, L_kl, gate_entropy
-            (L_kl is always 0.0 — KL term has been removed; key retained for log compat.)
         """
         # ── Per-sample terms ─────────────────────────────────────────
         L_ecg       = self.ecg_bce(student_ecg_logits, ecg_labels)      # (B,)
@@ -158,21 +165,41 @@ class DistillationLoss(nn.Module):
         else:
             L_align_text = torch.zeros_like(L_ecg)
 
+        if self.use_kl and teacher_ecg_logits is not None:
+            L_kl = self.kl_loss(student_ecg_logits, teacher_ecg_logits)  # (B,)
+        else:
+            L_kl = torch.zeros_like(L_ecg)
+
         t_cxr_for_gate  = teacher_cxr_emb  if self.use_cxr  else teacher_ecg_emb
         t_text_for_gate = teacher_text_emb if self.use_text else teacher_ecg_emb
 
         w = self.gate(student_emb, teacher_ecg_emb, t_cxr_for_gate, t_text_for_gate)  # (B, n_terms)
 
-        if self.n_terms == _N_TERMS_FULL:
-            terms = torch.stack([L_ecg, L_pulm, L_align_ecg, L_align_cxr, L_align_text], dim=1)
+        full_modal = self.use_cxr and self.use_text
+        if self.use_kl:
+            if full_modal:
+                terms = torch.stack(
+                    [L_ecg, L_pulm, L_align_ecg, L_align_cxr, L_align_text, L_kl], dim=1
+                )
+            else:
+                terms = torch.stack([L_ecg, L_pulm, L_align_ecg, L_kl], dim=1)
         else:
-            terms = torch.stack([L_ecg, L_pulm, L_align_ecg], dim=1)  # (B, 3)
+            if full_modal:
+                terms = torch.stack(
+                    [L_ecg, L_pulm, L_align_ecg, L_align_cxr, L_align_text], dim=1
+                )
+            else:
+                terms = torch.stack([L_ecg, L_pulm, L_align_ecg], dim=1)
 
-        gated     = (w * terms).sum(dim=1)
-        base_loss = gated.mean()
-        entropy   = ResidualLossGate.entropy(w)
-        reg       = ResidualLossGate.entropy_reg(w, self.lambda_h)
-        total     = base_loss + reg
+        # ── Corrected gate gradient direction ────────────────────────
+        # Student: minimize over task terms, gate weights act as fixed routing.
+        # Gate: maximise the weighted loss (focus on hard terms), minimise negative.
+        # Entropy reg: prevent gate collapse toward a single term.
+        student_component = (w.detach() * terms).sum(dim=1).mean()
+        gate_component    = -(w * terms.detach()).sum(dim=1).mean()
+        entropy           = ResidualLossGate.entropy(w)
+        reg               = ResidualLossGate.entropy_reg(w, self.lambda_h)
+        total             = student_component + gate_component + reg
 
         return {
             "loss":          total,
@@ -181,6 +208,6 @@ class DistillationLoss(nn.Module):
             "L_align_ecg":   L_align_ecg.mean().item(),
             "L_align_cxr":   L_align_cxr.mean().item(),
             "L_align_text":  L_align_text.mean().item(),
-            "L_kl":          0.0,
+            "L_kl":          L_kl.mean().item(),
             "gate_entropy":  entropy.item(),
         }

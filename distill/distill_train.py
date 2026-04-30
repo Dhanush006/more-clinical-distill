@@ -45,7 +45,8 @@ from distill_loss import DistillationLoss
 # ── Training utilities ────────────────────────────────────────────────
 
 def train_one_epoch(
-    student, loss_fn, loader, optimizer, scaler, device, epoch, total_epochs
+    student, loss_fn, loader, optimizer, scaler, device, epoch, total_epochs,
+    probe_W=None, probe_b=None,
 ):
     student.train()
     total_loss       = 0.0
@@ -63,6 +64,12 @@ def train_one_epoch(
         ecg_labels  = ecg_labels.to(device)
         pulm_labels = pulm_labels.to(device)
 
+        # Compute teacher probe logits on-the-fly from already-loaded ECG embeddings.
+        # probe_W: (10, 128), probe_b: (10,) — fit once at training start.
+        teacher_ecg_logits = None
+        if probe_W is not None and loss_fn.use_kl:
+            teacher_ecg_logits = t_ecg @ probe_W.T + probe_b   # (B, 10)
+
         with autocast():
             ecg_logits, pulm_logits, student_emb = student(ecg)
             result = loss_fn(
@@ -74,6 +81,7 @@ def train_one_epoch(
                 teacher_text_emb    = t_text,
                 ecg_labels          = ecg_labels,
                 pulm_labels         = pulm_labels,
+                teacher_ecg_logits  = teacher_ecg_logits,
             )
             loss = result["loss"]
 
@@ -220,6 +228,7 @@ def main():
     gate_enabled = gate_cfg.get("enabled", True)
     lambda_h     = gate_cfg.get("lambda_h", 0.1)
     modalities   = tuple(gate_cfg.get("modalities", ["ecg", "cxr", "text"]))
+    use_kl       = gate_cfg.get("use_kl", False)
 
     triplet_cache   = cfg["teacher"].get("triplet_cache")
     signal_cache    = cfg["data"].get("signal_cache")
@@ -278,7 +287,21 @@ def main():
         modalities      = modalities,
         embedding_dim   = cfg["student"].get("embedding_dim", 128),
         gate_hidden_dim = gate_cfg.get("hidden_dim", 64),
+        use_kl          = use_kl,
     ).to(device)
+
+    # Load frozen teacher probe weights for KL term (fit by cache_teacher_probe_logits.py)
+    probe_W = probe_b = None
+    probe_path = cfg["teacher"].get("probe_weights")
+    if use_kl:
+        if probe_path and Path(probe_path).exists():
+            probe_data = np.load(probe_path)
+            probe_W = torch.FloatTensor(probe_data["W"]).to(device)   # (10, 128)
+            probe_b = torch.FloatTensor(probe_data["b"]).to(device)   # (10,)
+            print(f"Loaded teacher probe weights from {probe_path}")
+        else:
+            print(f"WARNING: use_kl=True but probe_weights not found at {probe_path}. "
+                  "KL term will be zero. Run scripts/cache_teacher_probe_logits.py first.")
 
     gate_params = list(loss_fn.gate.parameters())
     print(f"LossGate parameters: {sum(p.numel() for p in gate_params):,} "
@@ -307,7 +330,8 @@ def main():
     for epoch in range(epochs):
         t0 = time.time()
         train_loss, term_avgs = train_one_epoch(
-            student, loss_fn, train_loader, optimizer, scaler, device, epoch, epochs
+            student, loss_fn, train_loader, optimizer, scaler, device, epoch, epochs,
+            probe_W=probe_W, probe_b=probe_b,
         )
         metrics = validate(student, val_loader, device, ecg_class_names, pulm_class_names)
         scheduler.step()
