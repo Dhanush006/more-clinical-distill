@@ -1,0 +1,21 @@
+# A5 — corrected gate + per-sample term normalisation
+# Same as A4 but gate curriculum uses normalised loss terms so all 6 terms
+# compete on equal footing (relative difficulty, not absolute magnitude).
+# This prevents alignment losses (~0.9) from always one-hotting the gate
+# onto themselves regardless of entropy reg strength.
+
+_extends: configs/distill_config.yaml
+
+outputs:
+  checkpoint_dir: outputs/ablations/A5_normgate_strat
+  log_dir:        logs/ablations/A5_normgate_strat
+
+loss_gate:
+  enabled:    true
+  lambda_h:   0.3
+  hidden_dim: 64
+  modalities: [ecg, cxr, text]
+  use_kl:     true
+
+student:
+  input_lead: 0   # Lead I

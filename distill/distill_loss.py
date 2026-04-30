@@ -194,9 +194,13 @@ class DistillationLoss(nn.Module):
         # ── Corrected gate gradient direction ────────────────────────
         # Student: minimize over task terms, gate weights act as fixed routing.
         # Gate: maximise the weighted loss (focus on hard terms), minimise negative.
+        #   Normalise terms per-sample so the gate sees *relative* difficulty, not
+        #   absolute magnitude. Without this, alignment losses (~0.9) always dominate
+        #   BCE losses (~0.2) and the gate one-hots onto alignment regardless of λ_H.
         # Entropy reg: prevent gate collapse toward a single term.
+        terms_normed      = terms.detach() / terms.detach().sum(dim=1, keepdim=True).clamp(min=1e-9)
         student_component = (w.detach() * terms).sum(dim=1).mean()
-        gate_component    = -(w * terms.detach()).sum(dim=1).mean()
+        gate_component    = -(w * terms_normed).sum(dim=1).mean()
         entropy           = ResidualLossGate.entropy(w)
         reg               = ResidualLossGate.entropy_reg(w, self.lambda_h)
         total             = student_component + gate_component + reg
