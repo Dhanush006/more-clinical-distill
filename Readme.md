@@ -10,7 +10,7 @@ Distil a 280M-parameter multimodal teacher (**MoRE**: ECG + Chest X-Ray + Text) 
 | **EfficientNet-B0** | 4.37 M | 16.97 MB | 10.01 ms | **0.7955** | **0.3457** |
 | Prior baseline (28 k records, legacy split) | 1.82 M | 7.07 MB | n/a | 0.7043 (val) | n/a |
 
-> **Headline:** A patient-stratified 80/10/10 split (zero subject overlap, per-class proportions within 0.1 pt across splits) gives an honest read on rare-class generalisation. EfficientNet-B0 wins decisively (test AUROC 0.7955, AUPRC 0.3457 → +28 % over MobileNet). A learned ResidualLossGate over five distillation losses **hurts by 10.7 pts** AUROC vs static weighting and is dropped in the deployment recipe (see `docs/team_report.md` §6). Legacy CXR-derived split numbers are kept as a parallel study in Appendix D.
+> **Headline:** A patient-stratified 80/10/10 split (zero subject overlap, per-class proportions within 0.1 pt across splits) gives an honest read on rare-class generalisation. EfficientNet-B0 wins decisively (test AUROC 0.7955, AUPRC 0.3457 → +28 % over MobileNet). A learned ResidualLossGate over five distillation losses **hurts by 10.7 pts** AUROC vs static weighting; post-analysis confirmed an inverted gradient direction — the gate was trained to avoid hard terms rather than focus on them. The fix (stop-gradient decoupling + KL reinstatement via a frozen LR probe) is queued as **A4_correctgate_strat** (see `docs/team_report.md` §6.3). Legacy CXR-derived split numbers are kept as a parallel study in Appendix D.
 
 ---
 

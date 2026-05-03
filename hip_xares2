@@ -1,0 +1,38 @@
+[33mf3f2bc8[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmore-KD[m[33m)[m Add per-sample term normalisation to gate curriculum signal (A5)
+[33mb132b74[m Fix ResidualLossGate gradient direction, reinstate KL via probe, add ablation A4
+[33ma2b4d2e[m[33m ([m[1;31morigin/more-KD[m[33m)[m Fix report figures: parse logs correctly, add EfficientNet per-class plot
+[33m1a20f7f[m Promote stratified results to primary; legacy split now Appendix D
+[33mfe39ef8[m DistillDataset: build a global teacher-embedding lookup across all 3 npz partitions
+[33mca82578[m Make val AUC robust to NaN logits; eval in fp32
+[33m3513dda[m Switch primary split to patient-stratified 80/10/10 multi-label split
+[33m1b496fb[m Polish report and README with embedded figures; remove course-project refs
+[33m920981c[m Populate team report with full test-set metrics for all 7 ablations
+[33mfb09e8f[m Add EfficientNet-B0 backbone, full metrics evaluator, team report
+[33m9b2ad3d[m Drop bogus KL term, accelerate epochs ~30x via ECG signal cache
+[33m9819b8f[m Add ResidualLossGate with 6-term per-sample distillation loss and ablation sweep
+[33m25ecebf[m Update CLAUDE.md: current pipeline state, re-cache job, split redesign notes
+[33maf41991[m Optimize convert script: pre-build file existence sets, 70x speedup
+[33m91f3b94[m Add CLAUDE.md, plan.md, flatten migration, and combined reports integration
+[33m537dd09[m docs: add progress report and update all docs to reflect current implementation
+[33m69e6e74[m docs: update README with dual-head KD pipeline, architecture, and baseline results
+[33m5777abb[m Fix NaN training: sanitize teacher embeddings + gradient clipping
+[33m3ed3c0b[m Add dual-head student: ECG rhythm (primary) + pulmonary (secondary)
+[33m8f04d77[m Phase 4+5: fix KD pipeline for partial-data training
+[33m63ab147[m Add teacher ECG encoder cache pipeline and fix timm compatibility
+[33m7253aad[m preprocess.slurm: auto-select Python env; chain after download job
+[33m79b6148[m Fix CXR version 2.0.0→2.1.0; fix metadata script crash on 403
+[33m53095bc[m Download pipeline: split ECG/CXR jobs, add metadata CSV script
+[33mca8ee97[m Phase 5: distillation-ready scaffold
+[33m77c7cd1[m Phase 4: smoke test configuration and validation script
+[33mad812cc[m Phase 3: MoRE compatibility layer + source bug fixes
+[33m684df56[m Phase 2: manifest-driven download pipeline
+[33m73e0775[m Phase 1: environment & reproducibility scaffolding
+[33m62c1cec[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m, [m[1;32mmain[m[33m)[m Update Readme.md
+[33m5d8f66b[m Update Readme.md
+[33m358eacc[m Update Readme.md
+[33ma923e7f[m Update Readme.md
+[33mc2c2a7b[m Update Readme.md
+[33mb30db27[m Add files via upload
+[33m9ba383f[m Rename Readme.txt to Readme.md
+[33me53f77f[m Update Readme.txt
+[33mb502542[m Add files via upload

@@ -239,14 +239,25 @@ The single biggest jump in this paper — +7–9 pts ECG AUROC (0.704 → 0.78�
 ### 6.2 EfficientNet-B0 is the deployment winner
 EfficientNet-B0 leads MobileNetV3-Small on every test-set quality metric on the stratified split: AUROC **0.7955 vs 0.7623** (+3.3 pts), AUPRC **0.3457 vs 0.2692** (+28 % relative), F1 **0.3977 vs 0.3219** (+24 %). The cost is 2.4× parameters (4.37 M vs 1.82 M), 2.4× checkpoint size (17 MB vs 7 MB), and 2.3× CPU latency (10.0 ms vs 4.4 ms). For continuous on-watch screening — where a 10 ms inference is invisible against the 1 s real-time budget — the trade-off is unambiguously in favour of B0. Recommendation: **ship EfficientNet-B0; keep MobileNetV3-Small as a bandwidth-constrained fallback.**
 
-### 6.3 Learned routing fails — and the conclusion is now robust
-The ResidualLossGate was hypothesised to find a per-sample compromise that dominates fixed weighting. On the stratified split it underperforms by **10.7 pts test AUROC** (A2_lossgate 0.6550 vs A0_baseline 0.7623) and **−39 % AUPRC** (0.1643 vs 0.2692). Every gate variant (A2/A3/B1/B2) ranks below every static or uniform variant. Three contributing mechanisms, in decreasing confidence:
+### 6.3 Learned routing fails — root cause identified, fix queued as A4
+The ResidualLossGate was hypothesised to find a per-sample compromise that dominates fixed weighting. On the stratified split it underperforms by **10.7 pts test AUROC** (A2_lossgate 0.6550 vs A0_baseline 0.7623) and **−39 % AUPRC** (0.1643 vs 0.2692). Every gate variant (A2/A3/B1/B2) ranks below every static or uniform variant.
 
-1. **Cold-start instability.** Early epochs have noisy student embeddings, so the gate's 512-d residual input `[s ‖ s−t_ecg ‖ s−t_cxr ‖ s−t_txt]` is mostly noise. Routing decisions made on noise calcify before they can become informative — the gate's entropy stays around 0.4 nats (vs uniform ln 5 ≈ 1.61) for the entire run.
-2. **Reward hacking.** Even with stop-gradient on the student, the gate can game its objective by upweighting whichever term currently has the smallest residual. The entropy regulariser (λ_H ∈ {0.1, 0.3}) only partially counteracts this.
+**Root cause (confirmed post-analysis):** The gate's gradient direction was inverted. The original forward pass computed `total = mean(w × terms)` and backpropagated through `w`. Minimising that scalar drives `∂loss/∂w_k ∝ terms_k` — the optimizer pushes `w_k` *down* when `terms_k` is *high*. The gate learned to **avoid** hard terms, the opposite of curriculum learning. The fix decouples gradients:
+
+```python
+# Corrected in distill_loss.py (A4 ablation):
+student_component = (w.detach() * terms).sum(dim=1).mean()   # gate = fixed router
+gate_component    = -(w * terms.detach()).sum(dim=1).mean()   # gate maximises weighted loss
+total             = student_component + gate_component + entropy_reg
+```
+
+Three additional contributing mechanisms (still present even with the gradient fix):
+
+1. **Cold-start instability.** Early epochs have noisy student embeddings, so the gate's 512-d residual input `[s ‖ s−t_ecg ‖ s−t_cxr ‖ s−t_txt]` is mostly noise. Routing decisions made on noise calcify before they can become informative — the gate's entropy stays ≈ 0.4 nats (vs uniform ln 5 ≈ 1.61) for the entire A2 run.
+2. **Entropy regulariser only partially counteracts collapse.** λ_H ∈ {0.1, 0.3} pushes the gate toward uniform but was insufficient with the inverted gradient.
 3. **Optimiser coupling.** Joint AdamW over student + gate parameters means gate updates can briefly dominate gradient norm, perturbing the student.
 
-A **gate-warmup variant** (uniform for first 10 epochs, then enable the gate) is the natural follow-up; it was not included in this round.
+The corrected run (**A4_correctgate_strat**, config in `configs/ablations/A4_correctgate_strat.yaml`) also reinstates KL distillation via a frozen logistic-regression probe on teacher ECG embeddings, adding a 6th loss term. Results pending. A **gate-warmup variant** (uniform for first 10 epochs, then enable gate) is a further follow-up that addresses cold-start without changing the gradient formulation.
 
 ### 6.4 Lead I dominates limb lead II and precordial V2
 On the stratified split, switching from Lead I to Lead II costs 9 pts test AUROC (0.7623 → 0.6636); switching to V2 costs 17 pts (→ 0.5952). Speculative reasons: Lead I is least affected by axis variation; rhythm classes (atrial fibrillation, AV block, sinus brady/tachy) express most cleanly in the I/II plane; V2 is precordial and best for STEMI/LVH but those are rare classes. Lead I should be the default for any single-lead deployment — and the gate did not learn to compensate for the worse lead.
@@ -365,8 +376,8 @@ Tests for the gate / loss live in `tests/test_loss_gate.py` and `tests/test_dist
 |---|---|---|
 | 1 | **Patient-stratified split (~39 k/4.9 k/4.9 k)** | Current test (n=274) gives wide CIs for rare classes |
 | 2 | **Quantise to int8 + on-device benchmark** | Validate the wearable feasibility numbers |
-| 3 | **Gate warm-up (10 epochs uniform → enable gate)** | Test the cold-start hypothesis from §6.2 |
-| 4 | **Cache teacher *logits* and re-introduce KL term** | The dropped distillation channel was load-bearing in the original design |
+| 3 | **A4_correctgate_strat: corrected gate gradient + KL probe** | Gate gradient direction was inverted in A2; fix + 6-term loss with frozen LR probe queued — see §6.3 |
+| 4 | **Gate warm-up (10 epochs uniform → enable gate)** | Test the cold-start hypothesis from §6.3 independently of the gradient fix |
 | 5 | **External validation on PTB-XL or Chapman-Shaoxing** | Distribution-shift robustness |
 | 6 | **Wrist-derived ECG fine-tuning** | Bridge the clinical → consumer gap |
 | 7 | **Class-weighted BCE for STEMI / LBBB** | Rare-class sensitivity is currently unmeasurable |
